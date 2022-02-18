@@ -110,7 +110,7 @@ Kafka 把所有的消息都保存到磁盘上，存放这些日志片段的目�
 * listeners
 
   ```shell
-  listeners: Listener List - Comma-separated list of URIs we will listen on and the listener names. If the listener name is not a security protocol, listener.security.protocol.map must also be set. Specify hostname as 0.0.0.0 to bind to all interfaces. Leave hostname empty to bind to default interface. Examples of legal listener lists: PLAINTEXT://myhost:9092,SSL://:9091 CLIENT://0.0.0.0:9092,REPLICATION://localhost:9093`
+  listeners: Listener List - Comma-separated list of URIs we will listen on and the listener names. If the listener name is not a security protocol, listener.security.protocol.map must also be set. Specify hostname as 0.0.0.0 to bind to all interfaces. Leave hostname empty to bind to default interface. Examples of legal listener lists: PLAINTEXT://myhost:9092,SSL://:9091 CLIENT://0.0.0.0:9092,REPLICATION://localhost:9093
   Type: stringDefault: nullValid Values: Importance: highUpdate Mode: per-broker
   # The address the socket server listens on. It will get the value returned from
   # java.net.InetAddress.getCanonicalHostName() if not configured.
@@ -135,6 +135,8 @@ Kafka 把所有的消息都保存到磁盘上，存放这些日志片段的目�
   和 `listeners` 相比多了个 `advertised`。`Advertised` 的含义表示宣称的、公布的，就是说这组监听器是 `Broker` 用于对外发布的。
 
   advertised_listeners 是对外暴露的服务端口，真正建立连接用的是 listeners。
+  
+  
 
 ### 主题默认配置
 
