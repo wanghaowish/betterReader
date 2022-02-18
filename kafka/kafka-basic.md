@@ -4,4 +4,296 @@ ApacheKafka®是一个分布式流媒体平台。它是一个分布式的，支�
 
 ## kafka基本术语
 
-![image-20220217150509165](C:\Users\wanghao\AppData\Roaming\Typora\typora-user-images\image-20220217150509165.png)
+**消息**：Kafka 中的数据单元被称为`消息`，也被称为记录，可以把它看作数据库表中某一行的记录。
+
+**批次**：为了提高效率， 消息会`分批次`写入 Kafka，批次就代指的是一组消息。
+
+**主题**：消息的种类称为 `主题`（Topic）,可以说一个主题代表了一类消息。相当于是对消息进行分类。主题就像是数据库中的表。
+
+**分区**：主题可以被分为若干个分区（partition），同一个主题中的分区可以不在一个机器上，有可能会部署在多个机器上，由此来实现 kafka 的`伸缩性`，单一主题中的分区有序，但是无法保证主题中所有的分区有序
+
+![img](https://raw.githubusercontent.com/wanghaowish/picGo/main/img/202202171552711.png)
+
+**生产者**： 向主题发布消息的客户端应用程序称为`生产者`（Producer），生产者用于持续不断的向某个主题发送消息。
+
+**消费者**：订阅主题消息的客户端程序称为`消费者`（Consumer），消费者用于处理生产者产生的消息。
+
+**消费者群组**：生产者与消费者的关系就如同餐厅中的厨师和顾客之间的关系一样，一个厨师对应多个顾客，也就是一个生产者对应多个消费者，`消费者群组`（Consumer Group）指的就是由一个或多个消费者组成的群体。
+
+![img](https://raw.githubusercontent.com/wanghaowish/picGo/main/img/202202171552724.png)
+
+**偏移量**：`偏移量`（Consumer Offset）是一种元数据，它是一个不断递增的整数值，用来记录消费者发生重平衡时的位置，以便用来恢复数据。
+
+**broker**: 一个独立的 Kafka 服务器就被称为 `broker`，broker 接收来自生产者的消息，为消息设置偏移量，并提交消息到磁盘保存。
+
+**broker 集群**：broker 是`集群` 的组成部分，broker 集群由一个或多个 broker 组成，每个集群都有一个 broker 同时充当了`集群控制器`的角色（自动从集群的活跃成员中选举出来）。
+
+**副本**：Kafka 中消息的备份又叫做 `副本`（Replica），副本的数量是可以配置的，Kafka 定义了两类副本：领导者副本（Leader Replica） 和 追随者副本（Follower Replica），前者对外提供服务，后者只是被动跟随。
+
+**重平衡**：Rebalance。消费者组内某个消费者实例挂掉后，其他消费者实例自动重新分配订阅主题分区的过程。Rebalance 是 Kafka 消费者端实现高可用的重要手段。
+
+## Kafka 的特性（设计原则）
+
+* `高吞吐、低延迟`：kakfa 最大的特点就是收发消息非常快，kafka 每秒可以处理几十万条消息，它的最低延迟只有几毫秒。
+
+* `高伸缩性`： 每个主题(topic) 包含多个分区(partition)，主题中的分区可以分布在不同的主机(broker)中。
+
+* `持久性、可靠性`： Kafka 能够允许数据的持久化存储，消息被持久化到磁盘，并支持数据备份防止数据丢失，Kafka 底层的数据存储是基于 Zookeeper 存储的，Zookeeper 我们知道它的数据能够持久存储。
+
+* `容错性`： 允许集群中的节点失败，某个节点宕机，Kafka 集群能够正常工作
+
+* `高并发`： 支持数千个客户端同时读写 
+## kafka系统架构
+
+![img](https://raw.githubusercontent.com/wanghaowish/picGo/main/img/202202181357369.png)
+
+一个典型的 Kafka 集群中包含若干Producer（可以是web前端产生的Page View，或者是服务器日志，系统CPU、Memory等），若干broker（Kafka支持水平扩展，一般broker数量越多，集群吞吐率越高），若干Consumer Group，以及一个Zookeeper集群。Kafka通过Zookeeper管理集群配置，选举leader，以及在Consumer Group发生变化时进行rebalance。Producer使用push模式将消息发布到broker，Consumer使用pull模式从broker订阅并消费消息。
+
+## kafka 为何如此之快
+
+Kafka 实现了`零拷贝`原理来快速移动数据，避免了内核之间的切换。Kafka 可以将数据记录分批发送，从生产者到文件系统（Kafka 主题日志）到消费者，可以端到端的查看这些批次的数据。
+
+批处理能够进行更有效的数据压缩并减少 I/O 延迟，Kafka 采取顺序写入磁盘的方式，避免了随机磁盘寻址的浪费
+
+## kafka重要参数配置
+
+### broker 端配置
+
+- broker.id
+
+每个 kafka broker 都有一个唯一的标识来表示，这个唯一的标识符即是 broker.id，它的默认值是 0。这个值在 kafka 集群中必须是唯一的，这个值可以任意设定，
+
+- port
+
+如果使用配置样本来启动 kafka，它会监听 9092 端口。修改 port 配置参数可以把它设置成任意的端口。要注意，如果使用 1024 以下的端口，需要使用 root 权限启动 kakfa。
+
+- zookeeper.connect
+
+用于保存 broker 元数据的 Zookeeper 地址是通过 zookeeper.connect 来指定的。比如我可以这么指定 `localhost:2181` 表示这个 Zookeeper 是运行在本地 2181 端口上的。我们也可以通过 比如我们可以通过 `zk1:2181,zk2:2181,zk3:2181` 来指定 zookeeper.connect 的多个参数值。该配置参数是用冒号分割的一组 `hostname:port/path` 列表，其含义如下
+
+hostname 是 Zookeeper 服务器的机器名或者 ip 地址。
+
+port 是 Zookeeper 客户端的端口号
+
+/path 是可选择的 Zookeeper 路径，Kafka 路径是使用了 `chroot` 环境，如果不指定默认使用跟路径。
+
+> 如果你有两套 Kafka 集群，假设分别叫它们 kafka1 和 kafka2，那么两套集群的`zookeeper.connect`参数可以这样指定：`zk1:2181,zk2:2181,zk3:2181/kafka1`和`zk1:2181,zk2:2181,zk3:2181/kafka2`
+
+- log.dirs
+
+Kafka 把所有的消息都保存到磁盘上，存放这些日志片段的目录是通过 `log.dirs` 来制定的，它是用一组逗号来分割的本地系统路径，log.dirs 是没有默认值的，**你必须手动指定他的默认值**。其实还有一个参数是 `log.dir`，如你所知，这个配置是没有 `s` 的，默认情况下只用配置 log.dirs 就好了，比如你可以通过 `/home/kafka1,/home/kafka2,/home/kafka3` 这样来配置这个参数的值。
+
+- num.recovery.threads.per.data.dir
+
+对于如下3种情况，Kafka 会使用`可配置的线程池`来处理日志片段。
+
+服务器正常启动，用于打开每个分区的日志片段；
+
+服务器崩溃后重启，用于检查和截断每个分区的日志片段；
+
+服务器正常关闭，用于关闭日志片段。
+
+默认情况下，每个日志目录只使用一个线程。因为这些线程只是在服务器启动和关闭时会用到，所以完全可以设置大量的线程来达到井行操作的目的。特别是对于包含大量分区的服务器来说，一旦发生崩愤，在进行恢复时使用井行操作可能会省下数小时的时间。设置此参数时需要注意，所配置的数字对应的是 log.dirs 指定的单个日志目录。也就是说，如果 num.recovery.threads.per.data.dir 被设为 8，并且 log.dir 指定了 3 个路径，那么总共需要 24 个线程。
+
+- auto.create.topics.enable
+
+默认情况下，kafka 会使用三种方式来自动创建主题，下面是三种情况：
+
+当一个生产者开始往主题写入消息时
+
+当一个消费者开始从主题读取消息时
+
+当任意一个客户端向主题发送元数据请求时
+
+`auto.create.topics.enable`参数我建议最好设置成 false，即不允许自动创建 Topic。在我们的线上环境里面有很多名字稀奇古怪的 Topic，我想大概都是因为该参数被设置成了 true 的缘故。
+
+* listeners
+
+  ```shell
+  listeners: Listener List - Comma-separated list of URIs we will listen on and the listener names. If the listener name is not a security protocol, listener.security.protocol.map must also be set. Specify hostname as 0.0.0.0 to bind to all interfaces. Leave hostname empty to bind to default interface. Examples of legal listener lists: PLAINTEXT://myhost:9092,SSL://:9091 CLIENT://0.0.0.0:9092,REPLICATION://localhost:9093`
+  Type: stringDefault: nullValid Values: Importance: highUpdate Mode: per-broker
+  # The address the socket server listens on. It will get the value returned from
+  # java.net.InetAddress.getCanonicalHostName() if not configured.
+  #   FORMAT:
+  #     listeners = listener_name://host_name:port
+  #   EXAMPLE:
+  #     listeners = PLAINTEXT://your.host.name:9092
+  ```
+
+  学名叫监听器，其实就是告诉外部连接者要通过什么协议访问指定主机名和端口开放的 `Kafka` 服务。如果侦听协议不是安全协议，则还必须设置 listener.security.protocol.map。监听的协议名称和端口号必须是唯一的。
+
+* advertisied.listeners
+
+  ```shell
+  advertised.listeners: Listeners to publish to ZooKeeper for clients to use, if different than the listeners config property. In IaaS environments, this may need to be different from the interface to which the broker binds. If this is not set, the value for listeners will be used. Unlike listeners it is not valid to advertise the 0.0.0.0 meta-address.
+  Type: stringDefault: nullValid Values: Importance: highUpdate Mode: per-broker
+  # Hostname and port the broker will advertise to producers and consumers. If not set,
+  # it uses the value for "listeners" if configured.  Otherwise, it will use the value
+  # returned from java.net.InetAddress.getCanonicalHostName().
+  ```
+
+  和 `listeners` 相比多了个 `advertised`。`Advertised` 的含义表示宣称的、公布的，就是说这组监听器是 `Broker` 用于对外发布的。
+
+  advertised_listeners 是对外暴露的服务端口，真正建立连接用的是 listeners。
+
+### 主题默认配置
+
+Kafka 为新创建的主题提供了很多默认配置参数，下面就来一起认识一下这些参数
+
+- num.partitions
+
+num.partitions 参数指定了新创建的主题需要包含多少个分区。如果启用了主题自动创建功能（该功能是默认启用的），主题分区的个数就是该参数指定的值。该参数的默认值是 1。要注意，我们可以增加主题分区的个数，但不能减少分区的个数。
+
+- default.replication.factor
+
+这个参数比较简单，它表示 kafka保存消息的副本数，如果一个副本失效了，另一个还可以继续提供服务default.replication.factor 的默认值为1，这个参数在你启用了主题自动创建功能后有效。
+
+- log.retention.ms
+
+Kafka 通常根据时间来决定数据可以保留多久。默认使用 log.retention.hours 参数来配置时间，默认是 168 个小时，也就是一周。除此之外，还有两个参数 log.retention.minutes 和 log.retentiion.ms 。这三个参数作用是一样的，都是决定消息多久以后被删除，推荐使用 log.retention.ms。
+
+- log.retention.bytes
+
+另一种保留消息的方式是判断消息是否过期。它的值通过参数 `log.retention.bytes` 来指定，作用在每一个分区上。也就是说，如果有一个包含 8 个分区的主题，并且 log.retention.bytes 被设置为 1GB，那么这个主题最多可以保留 8GB 数据。所以，当主题的分区个数增加时，整个主题可以保留的数据也随之增加。
+
+- log.segment.bytes
+
+上述的日志都是作用在日志片段上，而不是作用在单个消息上。当消息到达 broker 时，它们被追加到分区的当前日志片段上，当日志片段大小到达 log.segment.bytes 指定上限（默认为 1GB）时，当前日志片段就会被关闭，一个新的日志片段被打开。如果一个日志片段被关闭，就开始等待过期。这个参数的值越小，就越会频繁的关闭和分配新文件，从而降低磁盘写入的整体效率。
+
+- log.segment.ms
+
+上面提到日志片段经关闭后需等待过期，那么 `log.segment.ms` 这个参数就是指定日志多长时间被关闭的参数和，log.segment.ms 和 log.retention.bytes 也不存在互斥问题。日志片段会在大小或时间到达上限时被关闭，就看哪个条件先得到满足。
+
+- message.max.bytes
+
+broker 通过设置 `message.max.bytes` 参数来限制单个消息的大小，默认是 1000 000， 也就是 1MB，如果生产者尝试发送的消息超过这个大小，不仅消息不会被接收，还会收到 broker 返回的错误消息。跟其他与字节相关的配置参数一样，该参数指的是压缩后的消息大小，也就是说，只要压缩后的消息小于 mesage.max.bytes，那么消息的实际大小可以大于这个值
+
+这个值对性能有显著的影响。值越大，那么负责处理网络连接和请求的线程就需要花越多的时间来处理这些请求。它还会增加磁盘写入块的大小，从而影响 IO 吞吐量。
+
+- retention.ms
+
+规定了该主题消息被保存的时常，默认是7天，即该主题只能保存7天的消息，一旦设置了这个值，它会覆盖掉 Broker 端的全局参数值。
+
+- retention.bytes
+
+`retention.bytes`：规定了要为该 Topic 预留多大的磁盘空间。和全局参数作用相似，这个值通常在多租户的 Kafka 集群中会有用武之地。当前默认值是 -1，表示可以无限使用磁盘空间。
+
+### JVM 参数配置
+
+JDK 版本一般推荐直接使用 JDK1.8，这个版本也是现在中国大部分程序员的首选版本。JVM参数可以直接修改启动脚本bin/kafka-server-start.sh 中的变量值。
+
+说到 JVM 端设置，就绕不开`堆`这个话题，业界最推崇的一种设置方式就是直接将 JVM 堆大小设置为 6GB，这样会避免很多 Bug 出现。
+
+JVM 端配置的另一个重要参数就是垃圾回收器的设置，也就是平时常说的 `GC` 设置。如果你依然在使用 Java 7，那么可以根据以下法则选择合适的垃圾回收器：
+
+- 如果 Broker 所在机器的 CPU 资源非常充裕，建议使用 CMS 收集器。启用方法是指定`-XX:+UseCurrentMarkSweepGC`。
+- 否则，使用吞吐量收集器。开启方法是指定`-XX:+UseParallelGC`。
+
+当然了，如果你已经在使用 Java 8 了，那么就用默认的 G1 收集器就好了。在没有任何调优的情况下，G1 表现得要比 CMS 出色，主要体现在更少的 Full GC，需要调整的参数更少等，所以使用 G1 就好了。
+
+一般 G1 的调整只需要这两个参数即可
+
+- ​	MaxGCPauseMillis
+
+该参数指定每次垃圾回收默认的停顿时间。该值不是固定的，G1可以根据需要使用更长的时间。它的默认值是 200ms，也就是说，每一轮垃圾回收大概需要200 ms 的时间。
+
+- InitiatingHeapOccupancyPercent
+
+该参数指定了 G1 启动新一轮垃圾回收之前可以使用的堆内存百分比，默认值是45，这就表明G1在堆使用率到达45之前不会启用垃圾回收。这个百分比包括新生代和老年代。
+
+## Kafka Producer
+
+![img](https://raw.githubusercontent.com/wanghaowish/picGo/main/img/202202181610219.png)
+
+我们从创建一个`ProducerRecord` 对象开始，ProducerRecord 是 Kafka 中的一个核心类，它代表了一组 Kafka 需要发送的 `key/value` 键值对，它由记录要发送到的主题名称（Topic Name），可选的分区号（Partition Number）以及可选的键值对构成。
+
+在发送 ProducerRecord 时，我们需要将键值对对象由序列化器转换为字节数组，这样它们才能够在网络上传输。然后消息到达了分区器。
+
+如果发送过程中指定了有效的分区号，那么在发送记录时将使用该分区。如果发送过程中未指定分区，则将使用key 的 hash 函数映射指定一个分区。如果发送的过程中既没有分区号也没有，则将以循环的方式分配一个分区。选好分区后，生产者就知道向哪个主题和分区发送数据了。
+
+ProducerRecord 还有关联的时间戳，如果用户没有提供时间戳，那么生产者将会在记录中使用当前的时间作为时间戳。Kafka 最终使用的时间戳取决于 topic 主题配置的时间戳类型。
+
+- 如果将主题配置为使用 `CreateTime`，则生产者记录中的时间戳将由 broker 使用。
+- 如果将主题配置为使用`LogAppendTime`，则生产者记录中的时间戳在将消息添加到其日志中时，将由 broker 重写。
+
+然后，这条消息被存放在一个记录批次里，这个批次里的所有消息会被发送到相同的主题和分区上。由一个独立的线程负责把它们发到 Kafka Broker 上。
+
+Kafka Broker 在收到消息时会返回一个响应，如果写入成功，会返回一个 RecordMetaData 对象，**它包含了主题和分区信息，以及记录在分区里的偏移量，上面两种的时间戳类型也会返回给用户**。如果写入失败，会返回一个错误。生产者在收到错误之后会尝试重新发送消息，几次之后如果还是失败的话，就返回错误消息。
+
+### golang构建kafka producer
+
+使用sarama包
+
+```go get github.com/Shopify/sarama```
+
+![Sarama Producer 流程.png](https://raw.githubusercontent.com/wanghaowish/picGo/main/img/202202181705530.png)
+
+```go
+func Producer(topic string, limit int) {
+	config := sarama.NewConfig()
+	// 异步生产者不建议把 Errors 和 Successes 都开启，一般开启 Errors 就行
+	// 同步生产者就必须都开启，因为会同步返回发送成功或者失败
+	config.Producer.Return.Errors = true   // 设定需要返回错误信息
+	config.Producer.Return.Successes = false // 设定需要返回成功信息
+	producer, err := sarama.NewAsyncProducer([]string{kafka.HOST}, config)
+	if err != nil {
+		log.Fatal("NewSyncProducer err:", err)
+	}
+	defer producer.AsyncClose()
+    go func() {
+            // [!important] 异步生产者发送后必须把返回值从 Errors 或者 Successes 中读出来 不然会阻塞 sarama 内部处理逻辑 导致只能发出去一条消息
+            for {
+                select {
+                case s := <-producer.Successes():
+                    if s != nil {
+                        log.Printf("[Producer] Success: key:%v msg:%+v \n", s.Key, s.Value)
+                    }
+                case e := <-producer.Errors():
+                    if e != nil {
+                        log.Printf("[Producer] Errors：err:%v msg:%+v \n", e.Msg, e.Err)
+                    }
+                }
+            }
+        }()
+	// 异步发送
+	for i := 0; i < limit; i++ {
+		str := strconv.Itoa(int(time.Now().UnixNano()))
+		msg := &sarama.ProducerMessage{Topic: topic, Key: nil, Value: sarama.StringEncoder(str)}
+		// 异步发送只是写入内存了就返回了，并没有真正发送出去
+		// sarama 库中用的是一个 channel 来接收，后台 goroutine 异步从该 channel 中取出消息并真正发送
+		producer.Input() <- msg
+		atomic.AddInt64(&count, 1)
+		if atomic.LoadInt64(&count)%1000 == 0 {
+			log.Printf("已发送消息数:%v\n", count)
+		}
+
+	}
+	log.Printf("发送完毕 总发送消息数:%v\n", limit)
+}
+```
+
+* NewAsyncProducer() ：创建 一个 producer 对象
+
+* producer.Input() <- msg ：发送消息
+
+* s = <-producer.Successes()，e := <-producer.Errors() ：异步获取成功或失败信息
+
+异步生产者使用`channel`接收（生产成功或失败）的消息，并且也通过`channel`来发送消息，这样做通常是性能最高的。而同步生产者需要阻塞，直到收到了`acks`。但是这也带来了两个问题，一是性能变得更差了，而是可靠性是依靠参数`acks`来保证的。同步生产者可直接调用sendMessage方法，返回值为partition，offset以及error。
+
+sarama的生产者config参数
+
+* MaxMessageBytes int 这个参数影响了一条消息的最大字节数，默认是1000000。但是注意，这个参数必须要小于broker中的 `message.max.bytes`。
+
+* RequiredAcks RequiredAcks 这个参数影响了消息需要被多少broker写入之后才返回。取值可以是0、1、-1，分别代表了不需要等待broker确认才返回、需要分区的leader确认后才返回、以及需要分区的所有副本确认后返回。
+
+* Partitioner PartitionerConstructor 这个是分区器。`Sarama`默认提供了几种分区器，如果不指定默认使用Hash分区器。
+
+* Retry 这个参数代表了重试的次数，以及重试的时间，主要发生在一些可重试的错误中。
+
+* Flush 用于设置将消息打包发送，简单来讲就是每次发送消息到broker的时候，不是生产一条消息就发送一条消息，而是等消息累积到一定的程度了，再打包发送。所以里面含有两个参数。一个是多少条消息触发打包发送，一个是累计的消息大小到了多少，然后发送。
+
+* MaxOpenRequests int 这个参数代表了允许没有收到acks而可以同时发送的最大`batch`数。
+
+* Idempotent bool 用于幂等生产者，当这一项设置为`true`的时候，生产者将保证生产的消息一定是有序且精确一次的。
+
+当MaxOpenRequests这个参数配置大于1的时候，代表了允许有多个请求发送了还没有收到回应。假设此时的重试次数也设置为了大于1，当同时发送了2个请求，如果第一个请求发送到broker中，broker写入失败了，但是第二个请求写入成功了，那么客户端将重新发送第一个消息的请求，这个时候会造成乱序。消息的有序可以通过MaxOpenRequests设置为1来保证，这个时候每个消息必须收到了acks才能发送下一条，所以一定是有序的，但是不能够保证不重复。而且当MaxOpenRequests设置为1的时候，吞吐量不高。注意，当启动幂等生产者的时候，Retry次数必须要大于0，ack必须为all。
