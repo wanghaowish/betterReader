@@ -280,7 +280,7 @@ func Producer(topic string, limit int) {
 
 * s = <-producer.Successes()，e := <-producer.Errors() ：异步获取成功或失败信息
 
-异步生产者使用`channel`接收（生产成功或失败）的消息，并且也通过`channel`来发送消息，这样做通常是性能最高的。而同步生产者需要阻塞，直到收到了`acks`。但是这也带来了两个问题，一是性能变得更差了，而是可靠性是依靠参数`acks`来保证的。同步生产者可直接调用sendMessage方法，返回值为partition，offset以及error。
+异步生产者使用`channel`接收（生产成功或失败）的消息，并且也通过`channel`来发送消息，这样做通常是性能最高的。而同步生产者需要阻塞，直到收到了`acks`。但是这也带来了两个问题，一是性能变得更差了，而是可靠性是依靠参数`acks`来保证的。同步生产者可直接调用sendMessage方法，返回值为partition，offset以及error。同步生产者和异步生产者逻辑是一致的，只是在异步生产者基础上封装了一层。
 
 sarama的生产者config参数
 
@@ -299,3 +299,392 @@ sarama的生产者config参数
 * Idempotent bool 用于幂等生产者，当这一项设置为`true`的时候，生产者将保证生产的消息一定是有序且精确一次的。
 
 当MaxOpenRequests这个参数配置大于1的时候，代表了允许有多个请求发送了还没有收到回应。假设此时的重试次数也设置为了大于1，当同时发送了2个请求，如果第一个请求发送到broker中，broker写入失败了，但是第二个请求写入成功了，那么客户端将重新发送第一个消息的请求，这个时候会造成乱序。消息的有序可以通过MaxOpenRequests设置为1来保证，这个时候每个消息必须收到了acks才能发送下一条，所以一定是有序的，但是不能够保证不重复。而且当MaxOpenRequests设置为1的时候，吞吐量不高。注意，当启动幂等生产者的时候，Retry次数必须要大于0，ack必须为all。
+
+### producer源码分析
+
+#### NewAsyncProducer
+
+`async_producer.go`
+
+```go
+// NewAsyncProducer creates a new AsyncProducer using the given broker addresses and configuration.
+func NewAsyncProducer(addrs []string, conf *Config) (AsyncProducer, error) {
+	client, err := NewClient(addrs, conf)
+	if err != nil {
+		return nil, err
+	}
+	return newAsyncProducer(client)
+}
+
+func newAsyncProducer(client Client) (AsyncProducer, error) {
+	// Check that we are not dealing with a closed Client before processing any other arguments
+	if client.Closed() {
+		return nil, ErrClosedClient
+	}
+
+	txnmgr, err := newTransactionManager(client.Config(), client)
+	if err != nil {
+		return nil, err
+	}
+
+	p := &asyncProducer{
+		client:     client,
+		conf:       client.Config(),
+		errors:     make(chan *ProducerError),
+		input:      make(chan *ProducerMessage),
+		successes:  make(chan *ProducerMessage),
+		retries:    make(chan *ProducerMessage),
+		brokers:    make(map[*Broker]*brokerProducer),
+		brokerRefs: make(map[*brokerProducer]int),
+		txnmgr:     txnmgr,
+	}
+
+	// launch our singleton dispatchers
+	go withRecover(p.dispatcher)
+	go withRecover(p.retryHandler)
+
+	return p, nil
+}
+```
+
+`utils.go`
+
+```go
+func withRecover(fn func()) {
+	defer func() {
+		handler := PanicHandler
+		if handler != nil {
+			if err := recover(); err != nil {
+				handler(err)
+			}
+		}
+	}()
+
+	fn()
+}
+```
+
+
+
+可以看到在 `newAsyncProducer` 最后开启了两个 goroutine，一个为 `dispatcher`，一个为 `retryHandler `。
+
+#### dispatcher
+
+主要根据 `topic` 将消息分发到对应的 channel。
+
+```go
+// singleton
+// dispatches messages by topic
+func (p *asyncProducer) dispatcher() {
+	handlers := make(map[string]chan<- *ProducerMessage)
+	shuttingDown := false
+
+	for msg := range p.input {
+		if msg == nil {
+			Logger.Println("Something tried to send a nil message, it was ignored.")
+			continue
+		}
+
+		if msg.flags&shutdown != 0 {
+			shuttingDown = true
+			p.inFlight.Done()
+			continue
+		} else if msg.retries == 0 {
+			if shuttingDown {
+				// we can't just call returnError here because that decrements the wait group,
+				// which hasn't been incremented yet for this message, and shouldn't be
+				pErr := &ProducerError{Msg: msg, Err: ErrShuttingDown}
+				if p.conf.Producer.Return.Errors {
+					p.errors <- pErr
+				} else {
+					Logger.Println(pErr)
+				}
+				continue
+			}
+			p.inFlight.Add(1)
+		}
+		//拦截器逻辑
+		for _, interceptor := range p.conf.Producer.Interceptors {
+			msg.safelyApplyInterceptor(interceptor)
+		}
+
+		version := 1
+		if p.conf.Version.IsAtLeast(V0_11_0_0) {
+			version = 2
+		} else if msg.Headers != nil {
+			p.returnError(msg, ConfigurationError("Producing headers requires Kafka at least v0.11"))
+			continue
+		}
+		if msg.byteSize(version) > p.conf.Producer.MaxMessageBytes {
+			p.returnError(msg, ErrMessageSizeTooLarge)
+			continue
+		}
+		// 找到这个Topic对应的Handler
+		handler := handlers[msg.Topic]
+		if handler == nil {
+			handler = p.newTopicProducer(msg.Topic)
+			handlers[msg.Topic] = handler
+		}
+		// 把消息写进这个Handler中
+		handler <- msg
+	}
+
+	for _, handler := range handlers {
+		close(handler)
+	}
+}
+```
+
+具体逻辑：从 `p.input` 中取出消息并写入到 `handler` 中，如果 `topic` 对应的 `handler` 不存在，则调用 `newTopicProducer()` 创建。这里的 handler 是一个 buffered channel。
+
+然后再来看下`handler = p.newTopicProducer(msg.Topic)`这一行的代码。
+
+```go
+func (p *asyncProducer) newTopicProducer(topic string) chan<- *ProducerMessage {
+	input := make(chan *ProducerMessage, p.conf.ChannelBufferSize)
+	tp := &topicProducer{
+		parent:      p,
+		topic:       topic,
+		input:       input,
+		breaker:     breaker.New(3, 1, 10*time.Second),
+		handlers:    make(map[int32]chan<- *ProducerMessage),
+		partitioner: p.conf.Producer.Partitioner(topic),
+	}
+	go withRecover(tp.dispatch)
+	return input
+}
+```
+
+在这里创建了一个缓冲大小为`ChannelBufferSize`的channel，用于存放发送到这个主题的消息，然后创建了一个 `topicProducer`。一个需要注意的是`newTopicProducer` 的这种写法，内部创建一个 chan 返回到外层，然后通过在内部新开一个 goroutine 来处理该 chan 里的消息，这种写法在后面还会遇到好几次。在这个时候可以认为消息已经交付给各个 topic 对应的 topicProducer 了。
+
+```topicDispatch```
+
+`newTopicProducer`的最后一行`go withRecover(tp.dispatch)`又启动了一个 goroutine 用于处理消息。也就是说，到了这一步，对于每一个Topic，都有一个协程来处理消息。
+
+```go
+func (tp *topicProducer) dispatch() {
+	for msg := range tp.input {
+		if msg.retries == 0 {
+			if err := tp.partitionMessage(msg); err != nil {
+				tp.parent.returnError(msg, err)
+				continue
+			}
+		}
+
+		handler := tp.handlers[msg.Partition]
+		if handler == nil {
+			handler = tp.parent.newPartitionProducer(msg.Topic, msg.Partition)
+			tp.handlers[msg.Partition] = handler
+		}
+
+		handler <- msg
+	}
+
+	for _, handler := range tp.handlers {
+		close(handler)
+	}
+}
+```
+
+可以看到又是同样的套路：
+
+- 1）找到这条消息所在的分区对应的 channel，然后把消息丢进去
+
+- 2）如果不存在则新建 chan
+
+#### PartitionDispatch
+
+新建的 chan 是通过 `newPartitionProducer` 返回的，和之前的`newTopicProducer`又是同样的套路,点进去看一下：
+
+```go
+func (p *asyncProducer) newPartitionProducer(topic string, partition int32) chan<- *ProducerMessage {
+	input := make(chan *ProducerMessage, p.conf.ChannelBufferSize)
+	pp := &partitionProducer{
+		parent:    p,
+		topic:     topic,
+		partition: partition,
+		input:     input,
+
+		breaker:    breaker.New(3, 1, 10*time.Second),
+		retryState: make([]partitionRetryState, p.conf.Producer.Retry.Max+1),
+	}
+	go withRecover(pp.dispatch)
+	return input
+}
+```
+
+`TopicProducer`是按照 `Topic` 进行分发，这里的 `PartitionProducer` 则是按照 `partition` 进行分发。到这里可以认为消息已经交付给对应 topic 下的对应 partition 了，每个 partition 都会有一个 goroutine 来处理分发给自己的消息。
+
+```go
+func (pp *partitionProducer) dispatch() {
+	// try to prefetch the leader; if this doesn't work, we'll do a proper call to `updateLeader`
+	// on the first message
+	pp.leader, _ = pp.parent.client.Leader(pp.topic, pp.partition)
+	if pp.leader != nil {
+		pp.brokerProducer = pp.parent.getBrokerProducer(pp.leader)
+		pp.parent.inFlight.Add(1) // we're generating a syn message; track it so we don't shut down while it's still inflight
+		pp.brokerProducer.input <- &ProducerMessage{Topic: pp.topic, Partition: pp.partition, flags: syn}
+	}
+
+	defer func() {
+		if pp.brokerProducer != nil {
+			pp.parent.unrefBrokerProducer(pp.leader, pp.brokerProducer)
+		}
+	}()
+
+	for msg := range pp.input {
+		if pp.brokerProducer != nil && pp.brokerProducer.abandoned != nil {
+			select {
+			case <-pp.brokerProducer.abandoned:
+				// a message on the abandoned channel means that our current broker selection is out of date
+				Logger.Printf("producer/leader/%s/%d abandoning broker %d\n", pp.topic, pp.partition, pp.leader.ID())
+				pp.parent.unrefBrokerProducer(pp.leader, pp.brokerProducer)
+				pp.brokerProducer = nil
+				time.Sleep(pp.parent.conf.Producer.Retry.Backoff)
+			default:
+				// producer connection is still open.
+			}
+		}
+
+		if msg.retries > pp.highWatermark {
+			// a new, higher, retry level; handle it and then back off
+			pp.newHighWatermark(msg.retries)
+			pp.backoff(msg.retries)
+		} else if pp.highWatermark > 0 {
+			// we are retrying something (else highWatermark would be 0) but this message is not a *new* retry level
+			if msg.retries < pp.highWatermark {
+				// in fact this message is not even the current retry level, so buffer it for now (unless it's a just a fin)
+				if msg.flags&fin == fin {
+					pp.retryState[msg.retries].expectChaser = false
+					pp.parent.inFlight.Done() // this fin is now handled and will be garbage collected
+				} else {
+					pp.retryState[msg.retries].buf = append(pp.retryState[msg.retries].buf, msg)
+				}
+				continue
+			} else if msg.flags&fin == fin {
+				// this message is of the current retry level (msg.retries == highWatermark) and the fin flag is set,
+				// meaning this retry level is done and we can go down (at least) one level and flush that
+				pp.retryState[pp.highWatermark].expectChaser = false
+				pp.flushRetryBuffers()
+				pp.parent.inFlight.Done() // this fin is now handled and will be garbage collected
+				continue
+			}
+		}
+
+		// if we made it this far then the current msg contains real data, and can be sent to the next goroutine
+		// without breaking any of our ordering guarantees
+
+		if pp.brokerProducer == nil {
+			if err := pp.updateLeader(); err != nil {
+				pp.parent.returnError(msg, err)
+				pp.backoff(msg.retries)
+				continue
+			}
+			Logger.Printf("producer/leader/%s/%d selected broker %d\n", pp.topic, pp.partition, pp.leader.ID())
+		}
+
+		// Now that we know we have a broker to actually try and send this message to, generate the sequence
+		// number for it.
+		// All messages being retried (sent or not) have already had their retry count updated
+		// Also, ignore "special" syn/fin messages used to sync the brokerProducer and the topicProducer.
+		if pp.parent.conf.Producer.Idempotent && msg.retries == 0 && msg.flags == 0 {
+			msg.sequenceNumber, msg.producerEpoch = pp.parent.txnmgr.getAndIncrementSequenceNumber(msg.Topic, msg.Partition)
+			msg.hasSequence = true
+		}
+
+		pp.brokerProducer.input <- msg
+	}
+}
+```
+
+##### BrokerProducer
+
+真正的逻辑肯定在`pp.parent.getBrokerProducer(pp.leader)` 这个方法里面。我们继续跟进`pp.parent.getBrokerProducer(pp.leader)`这行代码里面的内容。其实就是找到`asyncProducer`中的`brokerProducer`，如果不存在，则创建一个。
+
+```go
+func (p *asyncProducer) getBrokerProducer(broker *Broker) *brokerProducer {
+	p.brokerLock.Lock()
+	defer p.brokerLock.Unlock()
+
+	bp := p.brokers[broker]
+
+	if bp == nil {
+		bp = p.newBrokerProducer(broker)
+		p.brokers[broker] = bp
+		p.brokerRefs[bp] = 0
+	}
+
+	p.brokerRefs[bp]++
+
+	return bp
+}
+```
+
+又调用了`newBrokerProducer()`，继续追踪下去：
+
+```go
+// one per broker; also constructs an associated flusher
+func (p *asyncProducer) newBrokerProducer(broker *Broker) *brokerProducer {
+	var (
+		input     = make(chan *ProducerMessage)
+		bridge    = make(chan *produceSet)
+		responses = make(chan *brokerProducerResponse)
+	)
+
+	bp := &brokerProducer{
+		parent:         p,
+		broker:         broker,
+		input:          input,
+		output:         bridge,
+		responses:      responses,
+		stopchan:       make(chan struct{}),
+		buffer:         newProduceSet(p),
+		currentRetries: make(map[string]map[int32]error),
+	}
+	go withRecover(bp.run)
+
+	// minimal bridge to make the network response `select`able
+	go withRecover(func() {
+		for set := range bridge {
+			request := set.buildRequest()
+
+			// Capture the current set to forward in the callback
+			sendResponse := func(set *produceSet) ProduceCallback {
+				return func(response *ProduceResponse, err error) {
+					responses <- &brokerProducerResponse{
+						set: set,
+						err: err,
+						res: response,
+					}
+				}
+			}(set)
+
+			// Use AsyncProduce vs Produce to not block waiting for the response
+			// so that we can pipeline multiple produce requests and achieve higher throughput, see:
+			// https://kafka.apache.org/protocol#protocol_network
+			err := broker.AsyncProduce(request, sendResponse)
+			if err != nil {
+				// Request failed to be sent
+				sendResponse(nil, err)
+				continue
+			}
+			// Callback is not called when using NoResponse
+			if p.conf.Producer.RequiredAcks == NoResponse {
+				// Provide the expected nil response
+				sendResponse(nil, nil)
+			}
+		}
+		close(responses)
+	})
+
+	if p.conf.Producer.Retry.Max <= 0 {
+		bp.abandoned = make(chan struct{})
+	}
+
+	return bp
+}
+```
+
+
+
+#### retryHandler
