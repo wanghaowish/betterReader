@@ -628,6 +628,7 @@ func (p *asyncProducer) newBrokerProducer(broker *Broker) *brokerProducer {
 	var (
 		input     = make(chan *ProducerMessage)
 		bridge    = make(chan *produceSet)
+		pending   = make(chan *brokerProducerResponse)
 		responses = make(chan *brokerProducerResponse)
 	)
 
@@ -637,7 +638,6 @@ func (p *asyncProducer) newBrokerProducer(broker *Broker) *brokerProducer {
 		input:          input,
 		output:         bridge,
 		responses:      responses,
-		stopchan:       make(chan struct{}),
 		buffer:         newProduceSet(p),
 		currentRetries: make(map[string]map[int32]error),
 	}
@@ -645,17 +645,24 @@ func (p *asyncProducer) newBrokerProducer(broker *Broker) *brokerProducer {
 
 	// minimal bridge to make the network response `select`able
 	go withRecover(func() {
+		// Use a wait group to know if we still have in flight requests
+		var wg sync.WaitGroup
+
 		for set := range bridge {
 			request := set.buildRequest()
 
+			// Count the in flight requests to know when we can close the pending channel safely
+			wg.Add(1)
 			// Capture the current set to forward in the callback
 			sendResponse := func(set *produceSet) ProduceCallback {
 				return func(response *ProduceResponse, err error) {
-					responses <- &brokerProducerResponse{
+					// Forward the response to make sure we do not block the responseReceiver
+					pending <- &brokerProducerResponse{
 						set: set,
 						err: err,
 						res: response,
 					}
+					wg.Done()
 				}
 			}(set)
 
@@ -674,7 +681,42 @@ func (p *asyncProducer) newBrokerProducer(broker *Broker) *brokerProducer {
 				sendResponse(nil, nil)
 			}
 		}
-		close(responses)
+		// Wait for all in flight requests to close the pending channel safely
+		wg.Wait()
+		close(pending)
+	})
+
+	// In order to avoid a deadlock when closing the broker on network or malformed response error
+	// we use an intermediate channel to buffer and send pending responses in order
+	// This is because the AsyncProduce callback inside the bridge is invoked from the broker
+	// responseReceiver goroutine and closing the broker requires such goroutine to be finished
+	go withRecover(func() {
+		buf := queue.New()
+		for {
+			if buf.Length() == 0 {
+				res, ok := <-pending
+				if !ok {
+					// We are done forwarding the last pending response
+					close(responses)
+					return
+				}
+				buf.Add(res)
+			}
+			// Send the head pending response or buffer another one
+			// so that we never block the callback
+			headRes := buf.Peek().(*brokerProducerResponse)
+			select {
+			case res, ok := <-pending:
+				if !ok {
+					continue
+				}
+				buf.Add(res)
+				continue
+			case responses <- headRes:
+				buf.Remove()
+				continue
+			}
+		}
 	})
 
 	if p.conf.Producer.Retry.Max <= 0 {
@@ -685,6 +727,204 @@ func (p *asyncProducer) newBrokerProducer(broker *Broker) *brokerProducer {
 }
 ```
 
+这里又启动了两个 goroutine，一个为 run，一个是匿名函数姑且称为 bridge。
 
+看这个方法中启动的第二个协程，可以推测`bridge`这个`channel`收到消息后，会把收到的消息打包成一个request，然后调用`AsyncProduce()`方法。
+
+并且，将返回的结果的指针地址，写进response中。
+
+然后构造好brokerProducerResponse，并且写入responses中。
+
+##### buildRequest
+
+buildRequest 方法主要是构建一个标准的 Kafka Request 消息。
+
+根据不同版本、是否配置压缩信息做了额外处理：
+
+```go
+
+func (ps *produceSet) buildRequest() *ProduceRequest {
+	req := &ProduceRequest{
+		RequiredAcks: ps.parent.conf.Producer.RequiredAcks,
+		Timeout:      int32(ps.parent.conf.Producer.Timeout / time.Millisecond),
+	}
+	if ps.parent.conf.Version.IsAtLeast(V0_10_0_0) {
+		req.Version = 2
+	}
+	if ps.parent.conf.Version.IsAtLeast(V0_11_0_0) {
+		req.Version = 3
+	}
+
+	if ps.parent.conf.Producer.Compression == CompressionZSTD && ps.parent.conf.Version.IsAtLeast(V2_1_0_0) {
+		req.Version = 7
+	}
+
+	for topic, partitionSets := range ps.msgs {
+		for partition, set := range partitionSets {
+			if req.Version >= 3 {
+				// If the API version we're hitting is 3 or greater, we need to calculate
+				// offsets for each record in the batch relative to FirstOffset.
+				// Additionally, we must set LastOffsetDelta to the value of the last offset
+				// in the batch. Since the OffsetDelta of the first record is 0, we know that the
+				// final record of any batch will have an offset of (# of records in batch) - 1.
+				// (See https://cwiki.apache.org/confluence/display/KAFKA/A+Guide+To+The+Kafka+Protocol#AGuideToTheKafkaProtocol-Messagesets
+				//  under the RecordBatch section for details.)
+				rb := set.recordsToSend.RecordBatch
+				if len(rb.Records) > 0 {
+					rb.LastOffsetDelta = int32(len(rb.Records) - 1)
+					for i, record := range rb.Records {
+						record.OffsetDelta = int64(i)
+					}
+				}
+				req.AddBatch(topic, partition, rb)
+				continue
+			}
+			if ps.parent.conf.Producer.Compression == CompressionNone {
+				req.AddSet(topic, partition, set.recordsToSend.MsgSet)
+			} else {
+				// When compression is enabled, the entire set for each partition is compressed
+				// and sent as the payload of a single fake "message" with the appropriate codec
+				// set and no key. When the server sees a message with a compression codec, it
+				// decompresses the payload and treats the result as its message set.
+
+				if ps.parent.conf.Version.IsAtLeast(V0_10_0_0) {
+					// If our version is 0.10 or later, assign relative offsets
+					// to the inner messages. This lets the broker avoid
+					// recompressing the message set.
+					// (See https://cwiki.apache.org/confluence/display/KAFKA/KIP-31+-+Move+to+relative+offsets+in+compressed+message+sets
+					// for details on relative offsets.)
+					for i, msg := range set.recordsToSend.MsgSet.Messages {
+						msg.Offset = int64(i)
+					}
+				}
+				payload, err := encode(set.recordsToSend.MsgSet, ps.parent.conf.MetricRegistry)
+				if err != nil {
+					Logger.Println(err) // if this happens, it's basically our fault.
+					panic(err)
+				}
+				compMsg := &Message{
+					Codec:            ps.parent.conf.Producer.Compression,
+					CompressionLevel: ps.parent.conf.Producer.CompressionLevel,
+					Key:              nil,
+					Value:            payload,
+					Set:              set.recordsToSend.MsgSet, // Provide the underlying message set for accurate metrics
+				}
+				if ps.parent.conf.Version.IsAtLeast(V0_10_0_0) {
+					compMsg.Version = 1
+					compMsg.Timestamp = set.recordsToSend.MsgSet.Messages[0].Msg.Timestamp
+				}
+				req.AddMessage(topic, partition, compMsg)
+			}
+		}
+	}
+
+	return req
+}
+```
+
+首先是构建一个 req 对象，然后遍历 ps.msg 中的消息，根据 topic 和 partition 分别写入到 req 中。
+
+回到newBrokerProducer()方法中，打包好request后，会调用`AsyncProduce()`方法。
+
+##### AsyncProduce
+
+```go
+// AsyncProduce sends a produce request and eventually call the provided callback
+// with a produce response or an error.
+//
+// Waiting for the response is generally not blocking on the contrary to using Produce.
+// If the maximum number of in flight request configured is reached then
+// the request will be blocked till a previous response is received.
+//
+// When configured with RequiredAcks == NoResponse, the callback will not be invoked.
+// If an error is returned because the request could not be sent then the callback
+// will not be invoked either.
+//
+// Make sure not to Close the broker in the callback as it will lead to a deadlock.
+func (b *Broker) AsyncProduce(request *ProduceRequest, cb ProduceCallback) error {
+	needAcks := request.RequiredAcks != NoResponse
+	// Use a nil promise when no acks is required
+	var promise *responsePromise
+
+	if needAcks {
+		// Create ProduceResponse early to provide the header version
+		res := new(ProduceResponse)
+		promise = &responsePromise{
+			headerVersion: res.headerVersion(),
+			// Packets will be converted to a ProduceResponse in the responseReceiver goroutine
+			handler: func(packets []byte, err error) {
+				if err != nil {
+					// Failed request
+					cb(nil, err)
+					return
+				}
+
+				if err := versionedDecode(packets, res, request.version()); err != nil {
+					// Malformed response
+					cb(nil, err)
+					return
+				}
+
+				// Wellformed response
+				b.updateThrottleMetric(res.ThrottleTime)
+				cb(res, nil)
+			},
+		}
+	}
+
+	return b.sendWithPromise(request, promise)
+}
+```
+
+##### sendWithPromise
+
+```go
+func (b *Broker) sendWithPromise(rb protocolBody, promise *responsePromise) error {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+
+	if b.conn == nil {
+		if b.connErr != nil {
+			return b.connErr
+		}
+		return ErrNotConnected
+	}
+
+	if !b.conf.Version.IsAtLeast(rb.requiredVersion()) {
+		return ErrUnsupportedVersion
+	}
+
+	req := &request{correlationID: b.correlationID, clientID: b.conf.ClientID, body: rb}
+	buf, err := encode(req, b.conf.MetricRegistry)
+	if err != nil {
+		return err
+	}
+
+	requestTime := time.Now()
+	// Will be decremented in responseReceiver (except error or request with NoResponse)
+	b.addRequestInFlightMetrics(1)
+	bytes, err := b.write(buf)
+	b.updateOutgoingCommunicationMetrics(bytes)
+	if err != nil {
+		b.addRequestInFlightMetrics(-1)
+		return err
+	}
+	b.correlationID++
+
+	if promise == nil {
+		// Record request latency without the response
+		b.updateRequestLatencyAndInFlightMetrics(time.Since(requestTime))
+		return nil
+	}
+
+	promise.requestTime = requestTime
+	promise.correlationID = req.correlationID
+	b.responses <- promise
+
+	return nil
+}
+```
+
+最终通过`bytes, err := b.write(buf)` 发送出去。
 
 #### retryHandler
