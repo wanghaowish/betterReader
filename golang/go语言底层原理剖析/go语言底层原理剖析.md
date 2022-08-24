@@ -1,6 +1,6 @@
 # go语言底层原理剖析
 
-## go语言编译器
+## 1. go语言编译器
 
 go编译器阶段：词法解析→语法解析→抽象语法树构建→类型检查→变量捕获→函数内联→**逃逸分析**→闭包重写→遍历并编译函数→SSA生成→机器码生成
 
@@ -17,7 +17,7 @@ go编译器阶段：词法解析→语法解析→抽象语法树构建→类型
 - **在一个切片存储指针或者带指针的值。**一个典型的例子就是 []*string 。这会导致切片的内容逃逸。尽管其后面的数组可能是在栈上分配的，但其引用的值一定是在堆上。
 - **slice 的背后数组被重新分配了，因为 append 时可能会超出其容量( cap )。** slice 初始化的地方在编译时是可以知道的，它最开始会在栈上分配。如果切片背后的存储要基于运行时的数据进行扩充，就会在堆上分配。
 - **在interface上调用方法。**在 interface 类型上调用方法都是动态调度的 —— 方法的真正实现只能在运行时知道。想像一个 io.Reader 类型的变量 r , 调用 r.Read(b) 会使得 r 的值和切片b 的背后存储都逃逸掉，所以会在堆上分配。
-## 浮点数
+## 2. 浮点数
 
 fmt包打印浮点数核心是调用标准库的strconv.FormatFloat函数。
 
@@ -33,17 +33,17 @@ fmt包打印浮点数核心是调用标准库的strconv.FormatFloat函数。
 
 shopspring/decimal 第三方库，在处理货币方面有一定优势
 
-## 类型推断
+## 3. 类型推断
 
 `:=`用于变量的类型推断。类型推断依赖于编译器的处理能力。
 
-## 常量与隐式类型转换
+## 4. 常量与隐式类型转换
 
 const关键字声明常量，声明时可以指定或者忽略类型。等号左边的叫命名常量，等号右边的叫未命名常量，未命名常量只会在编译期间存在，因此不会存在在内存中。命名常存在内存静态只读区， 不能被修改。go语言禁止对常量进行取地址操作。
 
 隐式类型转换的规则是有类型常量优先于无类型。无 类型常量运算时的优先级为：复数(Imag)>浮点数(float)>符文数(rune)>整数(int)
 
-## 字符串的本质与实现
+## 5. 字符串的本质与实现
 
 go语言中字符常量存储于静态编译区，字符串不能被修改，只能被访问。字符串本质是一个定长的字符数组。字符常量的拼接发生在编译时，字符串常量的拼接发生在运行时。字节数组和字符串的相互转换并不是无损的指针引用，而是涉及了复制。
 
@@ -58,7 +58,7 @@ type StringHeader struct{
 
 字母占据1个字节，中文一般占据3个字节。strings库内包含很多字符处理函数。strconv包含很多字符串转换的函数。``可以换行，""不能换行。字符串拼接的原理并不是简单的将一个字符串合并到另一个字符串中，而是找一个更大的空间，通过内存复制的形式将字符串复制到其中。
 
-## 数组
+## 6. 数组
 
 三种声明方式
 
@@ -70,7 +70,7 @@ arr3:=[...]int{1,2,3} //语法糖 ... 这种声明方式在编译时自动推断
 
 数组在赋值和函数调用时的形参都是值复制。数组在编译时会进行重要的优化，当数组长度小于4时，运行时数组会被放置在栈中，大于4则会放在内存的静态只读区。数组一般在Go语言中比较少用。
 
-## 切片
+## 7. 切片
 
 切片相对于数组而言在Go中更常用。切片是长度可变的序列，序列中的每个元素都有相同的类型。它和数组不同的是切片不需要指定长度。切片是一种轻量级的数据结构，提供了访问数组任意元素的功能。
 
@@ -131,7 +131,7 @@ numbers:=append(numbers[:a],numbers[a+1:]...)
 
 
 
-## 哈希表（map）
+## 8. 哈希表（map）
 
 哈希表的原理是将多个键值对分散存储在buckets中。给定一个keyhash算法会计算出键值对存储的位置。map是o(1)时间复杂度的操作。
 
@@ -179,36 +179,39 @@ numbers:=append(numbers[:a],numbers[a+1:]...)
 
 ### 哈希表底层结构
 
-    ```go
-    // A header for a Go map.
-    type hmap struct {
-    	// Note: the format of the hmap is also encoded in cmd/compile/internal/reflectdata/reflect.go.
-    	// Make sure this stays in sync with the compiler's definition.
-    	count     int // # live cells == size of map.  Must be first (used by len() builtin)
-    	flags     uint8
-    	B         uint8  // log_2 of # of buckets (can hold up to loadFactor * 2^B items)
-    	noverflow uint16 // approximate number of overflow buckets; see incrnoverflow for details
-    	hash0     uint32 // hash seed
-    
-    	buckets    unsafe.Pointer // array of 2^B Buckets. may be nil if count==0.
-    	oldbuckets unsafe.Pointer // previous bucket array of half the size, non-nil only when growing
-    	nevacuate  uintptr        // progress counter for evacuation (buckets less than this have been evacuated)
-    
-    	extra *mapextra // optional fields
-    }
-    ```
+```go
+// A header for a Go map.
+type hmap struct {
+	// Note: the format of the hmap is also encoded in cmd/compile/internal/reflectdata/reflect.go.
+	// Make sure this stays in sync with the compiler's definition.
+	count     int // # live cells == size of map.  Must be first (used by len() builtin)
+	flags     uint8
+	B         uint8  // log_2 of # of buckets (can hold up to loadFactor * 2^B items)
+	noverflow uint16 // approximate number of overflow buckets; see incrnoverflow for details
+	hash0     uint32 // hash seed
+
+	buckets    unsafe.Pointer // array of 2^B Buckets. may be nil if count==0.
+	oldbuckets unsafe.Pointer // previous bucket array of half the size, non-nil only when growing
+	nevacuate  uintptr        // progress counter for evacuation (buckets less than this have been evacuated)
+
+	extra *mapextra // optional fields
+}
+
+```
 
 其中：
 
-         - count代表map中的元素数量
-         - flags代表当前map的状态（是否处在正在写入的状态等等）
-         - 2的B次幂标识当前map中桶的数量，2^B=Buckets size
-         - noverflow为map中溢出桶的数量。当溢出桶太多时，map会进行same-size map growth。其实质是避免桶过大导致内存泄露。
-         - hash0代表生成hash的随机数种子
-         - buckets指向当前map对应的桶的指针。
-         - oldbuckets是在map扩容时存储旧桶的。当所有旧桶中的数据都已经转移到了新桶中时，则清空
-         - nevacuate在扩容时使用，用于标记当前旧桶中小于nevacuate的数据已经被转移到了新桶中
-         - extra存储map中的溢出桶
+```go
+     - count代表map中的元素数量
+     - flags代表当前map的状态（是否处在正在写入的状态等等）
+     - 2的B次幂标识当前map中桶的数量，2^B=Buckets size
+     - noverflow为map中溢出桶的数量。当溢出桶太多时，map会进行same-size map growth。其实质是避免桶过大导致内存泄露。
+     - hash0代表生成hash的随机数种子
+     - buckets指向当前map对应的桶的指针。
+     - oldbuckets是在map扩容时存储旧桶的。当所有旧桶中的数据都已经转移到了新桶中时，则清空
+     - nevacuate在扩容时使用，用于标记当前旧桶中小于nevacuate的数据已经被转移到了新桶中
+     - extra存储map中的溢出桶
+```
 
 ```go
 
@@ -355,7 +358,7 @@ tophash此字段顺序存储key的hash值的前8位。桶在存储的taophash字
 
 数据转移遵行写时复制的规则，只有在真正赋值时，才会选择是否需要进行数据转移，才会将旧桶的数据打散放入新桶。
 
-## 函数和栈
+## 9. 函数和栈
 
 函数是程序中为了执行特定任务而存在的一系列执行代码。在Go语言中，函数是一等公民，这意味着可以将它看作变量，并且它可以作为参数传递，返回及赋值。它还可以具有多返回值。
 
@@ -374,10 +377,10 @@ tophash此字段顺序存储key的hash值的前8位。桶在存储的taophash字
 ### 栈调试
 
 - 设置stackDebug为1（需要修改go的源码，并重新进行编译）
-- 使用debug.PrintStack方法
-- 获取某一时刻的堆栈信息，还可以使用标准库pprof。pprof.LookUp("goroutine")可以获取当前时刻协程的栈信息。
+- 使用`debug.PrintStack`方法
+- 获取某一时刻的堆栈信息，还可以使用标准库`pprof`。`pprof.LookUp("goroutine")`可以获取当前时刻协程的栈信息。
 
-## defer的延迟调用
+## 10. defer的延迟调用
 
 defer是Go语言中的关键字。在Go语言中，defer一般用于资源的释放以及异常panic的处理。
 
@@ -413,7 +416,7 @@ defer func(...){
   last-in first-out （后入先出）。
 
 defer的设计经历了复杂的演进过程，从最初的堆分配defer内存并放入协程的链表中，到Go1.13的栈分配将defer放置到栈内存并放入协程链表中，再到Go1.14后的内联defer，使得defer的性能已经与函数的直接调用相似。因此，在实践中，不需要考虑defer函数带来的性能损耗。
-## 异常和异常捕获
+## 11. 异常和异常捕获
 
 ### panic函数
 
@@ -425,25 +428,71 @@ defer的设计经历了复杂的演进过程，从最初的堆分配defer内存�
 
 ### panic结合recover
 
+recover函数最终捕获的是最近发生的panic。
+
+## 12. 接口和程序设计模式
+
+Go语言中可以为任何自定义的类型添加方法，没有任何形式的基于类型的继承，使用接口来实现扁平化、面向组合的设计模式。在Go语言中，接口是一种特殊的类型，是其他类型可以实现的方法签名的集合。方法签名只包含方法名、输入参数和返回值。
+
+#### Go接口的使用
+
+接口包含两种形式： 一种是带方法签名的接口，一种是空接口。`type InterfaceName interface{}`。Go当中接口是隐式的，只要某一类型的方法中实现了接口中的全部方法签名，就意味着此类型实现了这个接口。多个类型可以实现同一个接口，一个类型也可以同时实现多个接口。定义的接口也可以是其他接口的组合。
+
+一个接口包含的方法越多，其抽象性就越低，表达的行为就越具体。Go语言中的接口可以使程序自然、优雅、安全的增长，接口的更改仅影响实现接口的直接类型。使用`i.(Type)`在运行时获取存储在接口中的类型。
+
+#### 空接口
+
+空接口增强了代码的扩展性和通用性。
+
+#### 接口的比较
+
+两个接口之间可以通过==和!=进行比较。接口的比较规则如下：
+
+* 动态值为nil的接口变量总是相等的。
+* 如果只有一个接口为nil，那么一定不相等。
+* 如果两个接口不为nil，且接口变量具有相同的动态类型和动态类型值，那么两个接口是相等的。
+* 如果接口存储的动态类型值是不可比较的，那么在运行时会报错。（可比较的类型有`bool`、数值型、字符、指针、数组，结构体内的所有成员都可比较的话，结构体也可以比较。切片、map、函数等不可比较）
+
+## 13. 反射
+
+反射可以在运行时探测到结构体变量中的方法名。
+
+#### 反射的基本使用方法
+
+```go
+func ValueOf(i interface{}) Value //反射的值
+//reflect.Value类型中的Type方法可以获取当前反射的类型
+func (v value) Type() Type
+
+func TypeOf(i interface{}) Type //反射的类型
+
+//reflect.Value和reflect.Type都有Kind方法，通过Kind类型可以方便地验证反射的类型
+```
+
+可以通过接口的断言语法对接口`reflect.Value`进行转换。也可以通过`reflect.Value`提供的转换具体类型的方法，这些特殊的方法可以加快转换的速度。但是要注意的是这些方法要转换的类型和实际类型需要相符。
+
+```go
+	a := "test"
+	v := reflect.ValueOf(a)
+	b := v.Interface().(string)
+	c := v.String()
+```
 
 
-## 接口和程序设计模式
 
-## 反射
+## 14. 协程初探
 
-## 协程初探
+## 15. 协程设计和调度原理
 
-## 协程设计和调度原理
+## 16. 通道和协程通信
 
-## 通道和协程通信
+## 17. 并发
 
-## 并发
+## 18. 内存分配管理
 
-## 内存分配管理
+## 19. 垃圾回收（GC）初探
 
-## 垃圾回收（GC）初探
+## 20. 深入垃圾回收全流程
 
-## 深入垃圾回收全流程
-
-## 调试：特征分析和事件追踪
+## 21. 调试：特征分析和事件追踪
 
