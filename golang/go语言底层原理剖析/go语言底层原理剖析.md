@@ -1,3 +1,7 @@
+---
+
+---
+
 # go语言底层原理剖析
 
 ## 1. go语言编译器
@@ -141,7 +145,7 @@ numbers:=append(numbers[:a],numbers[a+1:]...)
 
 - 拉链法
 
-  将同一个桶中的元素通过链表的形式形成链接。随着桶中元素的增加，可以不断链接新的元素，同时不用预先为元素分配内存。它的不足之处在于它需要存储额外的指针用于链接元素，增加了整个哈希表的大小。同时由于链表存储的地址不连续，所以无法高效地利用CPU高速缓存。Go采用的拉链法。
+  将同一个桶中的元素通过链表的形式形成链接。随着桶中元素的增加，可以不断链接新的元素，同时不用预先为元素分配内存。它的不足之处在于它需要存储额外的指针用于链接元素，增加了整个哈希表的大小。同时由于链表存储的地址不连续，所以无法高效地利用CPU高速缓存。Go语言中的哈希表采用的是优化的拉链法，每一个桶中存储了8个元素用于加速访问。
 
 - 开放寻址法
 
@@ -413,7 +417,7 @@ defer func(...){
 
 - 参数多次执行与LIFO执行顺序
 
-  last-in first-out （后入先出）。
+  last-in first-out （后进先出）。
 
 defer的设计经历了复杂的演进过程，从最初的堆分配defer内存并放入协程的链表中，到Go1.13的栈分配将defer放置到栈内存并放入协程链表中，再到Go1.14后的内联defer，使得defer的性能已经与函数的直接调用相似。因此，在实践中，不需要考虑defer函数带来的性能损耗。
 ## 11. 异常和异常捕获
@@ -434,17 +438,17 @@ recover函数最终捕获的是最近发生的panic。
 
 Go语言中可以为任何自定义的类型添加方法，没有任何形式的基于类型的继承，使用接口来实现扁平化、面向组合的设计模式。在Go语言中，接口是一种特殊的类型，是其他类型可以实现的方法签名的集合。方法签名只包含方法名、输入参数和返回值。
 
-#### Go接口的使用
+### Go接口的使用
 
 接口包含两种形式： 一种是带方法签名的接口，一种是空接口。`type InterfaceName interface{}`。Go当中接口是隐式的，只要某一类型的方法中实现了接口中的全部方法签名，就意味着此类型实现了这个接口。多个类型可以实现同一个接口，一个类型也可以同时实现多个接口。定义的接口也可以是其他接口的组合。
 
 一个接口包含的方法越多，其抽象性就越低，表达的行为就越具体。Go语言中的接口可以使程序自然、优雅、安全的增长，接口的更改仅影响实现接口的直接类型。使用`i.(Type)`在运行时获取存储在接口中的类型。
 
-#### 空接口
+### 空接口
 
 空接口增强了代码的扩展性和通用性。
 
-#### 接口的比较
+### 接口的比较
 
 两个接口之间可以通过==和!=进行比较。接口的比较规则如下：
 
@@ -455,9 +459,9 @@ Go语言中可以为任何自定义的类型添加方法，没有任何形式的
 
 ## 13. 反射
 
-反射可以在运行时探测到结构体变量中的方法名。
+反射可以在运行时探测到结构体变量中的方法名。反射为Go语言提供了复杂的、意想不到的处理能力及灵活些。这种灵活些以牺牲效率和可理解性为代价。
 
-#### 反射的基本使用方法
+### 反射的基本使用方法
 
 ```go
 func ValueOf(i interface{}) Value //反射的值
@@ -466,23 +470,211 @@ func (v value) Type() Type
 
 func TypeOf(i interface{}) Type //反射的类型
 
-//reflect.Value和reflect.Type都有Kind方法，通过Kind类型可以方便地验证反射的类型
 ```
 
-可以通过接口的断言语法对接口`reflect.Value`进行转换。也可以通过`reflect.Value`提供的转换具体类型的方法，这些特殊的方法可以加快转换的速度。但是要注意的是这些方法要转换的类型和实际类型需要相符。
+`reflect.Value`和`reflect.Type`都有Kind方法获取标识类型的Kind，通过Kind类型.可以方便地验证反射的类型。可以通过接口的断言语法对接口`reflect.Value`进行转换。也可以通过`reflect.Value`提供的转换具体类型的方法，这些特殊的方法可以加快转换的速度。但是要注意的是这些方法要转换的类型和实际类型需要相符。如果反射中存储的是指针或者接口，可以通过Elem方法访问指针或者接口返回的数据。
 
 ```go
 	a := "test"
 	v := reflect.ValueOf(a)
 	b := v.Interface().(string)
 	c := v.String()
+	d := reflect.ValueOf(&a).Elem().String() //需要注意的是Elem方法只适用于Value存储的是指针或者接口。
+```
+
+修改反射的值可以用Set方法。
+
+``` go
+func (v Value) Set (x Value)//要求反射的类型必须是指针 可以用CanSet方法去获取当前的反射值是否可以赋值
+```
+
+应用反射的大部分情况都涉及结构体。
+
+`NumField`函数可以获取结构体中字段的个数。`reflect.Type`的Field方法主要用于获取结构体的元信息。`reflect.Value`的Field方法主要返回结构体字段的值类型，后续可以使用它修改结构体字段的值。reflect.ValueOf()传递结构体指针，然后通过Elem方法获取指针指向的结构体值类型，再调用Field方法赋值。
+
+```go
+	var s struct {
+		X int
+		y float64
+	}
+	vs := reflect.ValueOf(&s).Elem()
+	vs.Field(0).Set(reflect.ValueOf(1))//X可以被复制，但是y不可以
+```
+
+`reflect.Type`还有`Method`方法、`MethodByName`方法以及`NumMethod`方法。`reflect.Value`还有`MethodByName`方法。还可以通过Type方法把`reflect.Value`转换为`reflect.Type`。获取到代表方法的`reflect.Value`对象后，可以通过call方法在运行时调用方法。
+
+```go
+type User struct {
+	Id   int
+	Name string
+	Age  int
+}
+
+func (u User) PrintAge(age *int) {
+	fmt.Println(*age)
+}
+
+func (u User) PrintName(name string) {
+	fmt.Println(name)
+}
+func main() {
+	user := User{Name: "test", Age: 18}
+	getType := reflect.TypeOf(user)
+	getValue := reflect.ValueOf(user)
+	for i := 0; i < getType.NumMethod(); i++ {
+		m := getType.Method(i)
+		fmt.Println(m.Name, m.Type)
+	}
+	methodValue := getValue.MethodByName("PrintAge")
+	args := make([]reflect.Value, 0)
+	age := 18
+	args = append(args, reflect.ValueOf(&age))
+	methodValue.Call(args)
+	tf := getValue.MethodByName("PrintAge").Type()
+	fmt.Println(tf.NumIn(), tf.NumOut(), getValue.NumMethod())
+}
+```
+
+函数的动态调用和方法的动态调用是相同的。
+
+## 14. 协程初探 
+
+并发不等于并行！
+
+### 进程和线程
+
+线程是可以由调度程序独立管理的最小程序指令集，而进程是程序运行的实例。大多数情况下，线程是进程的组成部分。一个进程中可以由多个线程，这些线程并发执行并共享进程的内存等资源。而进程之间相互独立。
+
+### 线程上下文切换
+
+当发生线程上下文切换时，需要从操作系统用户态转移到内核态，记录上一个线程的重要寄存器值、进程状态等信息，这些信息存储在操作系统线程控制块中，当切换到下一个要执行的线程时，需要加载重要的CPU寄存器值，并从内核态切换到操作系统用户态，如果线程在上下文切换时属于不同的进程，那么需要更新额外的状态信息以及内存地址空间，同时将新的页表导入内存。不同进程的切换要显著慢于同一进程中的线程切换。
+
+### 线程与协程
+
+在Go语言当中，协程认为是轻量级的线程。协程与线程的区别在于以下几点：
+
+* 调度方式 协程是用户态的，协程的管理依赖Go语言运行时的调度器，协程是从属于某一个线程的，多对多关系。
+
+* 上下文切换速度 协程的速度要快于线程，因为协程切换不需要经过操作系统用户态与内核态的切换。并且协程切换只需要保留极少的状态和寄存器变量值。
+
+* 调度策略 线程的调度大多都是抢占式的，操作系统调度器为了均衡执行周期，会定时发送中断信号。而Go的协程一般情况下都是协作式调度，可以主动将执行权限让给其他协程。当一个协程运行过长时间，Go调度器才会强制抢占其执行。
+
+* 栈的大小 线程的栈一般都是创建时指定，默认栈会比较大（例如2 MB）。Go语言中的协程栈默认2 KB。线程的栈在运行时不能更改，Go语言的协程栈在会动态检测栈的大小并扩容。协程在实践中可以看作轻量的资源。
+
+### 并发与并行
+
+通俗的说，并发指同时处理多个任务的能力。
+
+Go使用协程非常方便，只需要在特定的函数前加上关键字go即可。Go语言号称天生支持高并发，是开发大规模、高并发项目的极佳选择。
+
+## 15. 深入协程设计和调度原理
+
+### 协程的状态
+
+![image-20220830150027066](C:\Users\wanghao\AppData\Roaming\Typora\typora-user-images\image-20220830150027066.png)
+
+* Gidle为协程刚开始创建时的状态，当新创建的协程初始化后，会变为Gdead的状态，_Gdead状态也是协程被销毁时的状态。
+
+* _Grunnable表示当前协程在运行队列中，正在等待运行
+
+* _Grunning代表当前协程正在被运行，已经被分配给了逻辑处理器和线程
+
+* _Gwaiting表示当前协程在运行时被锁定，不能执行用户代码。在垃圾回收及channel通信时经常会遇到这种情况。
+
+* _Gsyscall代表当前协程正在执行系统调用
+
+* _Gpreempted是Go1.14新加的状态，代表协程G被强制抢占后的状态
+
+* _Gcopystack代表在进行协程栈扫描时发现需要扩容或缩小协程栈空间，将协程中的栈转移到新栈时的状态。
+
+还有几个状态（**_Gscan**,**_Gscanrunnable**,**_Gscanrunning**等）涉及垃圾回收阶段。
+
+### 特殊协程g0和协程切换
+
+每个线程中都有一个特殊的协程g0。它运行在操作系统线程栈上，其作用主要是执行协程调度的一系列运行代码。
+
+在Go语言中没有直接暴露线程本地存储的编程方式。但是Go语言运行时的调度器使用线程本地存储将具体操作系统的线程和运行时代表现线程的m结构体绑定在一起，因此在任意一个线程内部，通过线程本地存储，都可以在任意时刻获取绑定到当前线程上的协程g、结构体m、逻辑处理器P、特殊协程g0等信息。
+
+### 调度循环
+
+![image-20220830161300798](C:\Users\wanghao\AppData\Roaming\Typora\typora-user-images\image-20220830161300798.png)
+
+调度循环指从调度协程g0开始，找到接下来要运行的协程g、正在从协程g切换到协程g0开始新一轮调度的过程。
+
+从g0调度到协程g，经历了从schedule函数到execute函数再到gogo函数的过程。schedule函数处理具体的调度策略，选择下一个要执行的协程；execute函数执行一些具体的状态转移、协程g与结构体m之间的绑定等操作；gogo函数是与操作系统有关的函数，用于完成栈的切换及CPU寄存器的恢复。
+
+执行完毕后，切换到g执行。当协程g主动让渡、被强占或退出后，又会切换到协程g0进行第二轮调度。mcall函数用于保存当前协程的执行现场，并切换到协程g0继续执行。切换到协程g0后会根据切换的原因执行不同的函数。例如用户调用Gosched函数则主动让渡执行权，执行gosched_m函数。如果协程已经退出，则执行goexit函数，将协程g放入p的freeg队列，方便下次重用。执行完毕后，再次调用schedule函数进行新一轮的调度循环。
+
+### 调度策略
+
+调度的核心策略位于schedule函数当中。schedule函数首先会检测程序是否处于垃圾回收阶段，如果是，则检测是否需要执行后台标记协程。
+
+Go语言调度器将运行队列分为局部运行队列和全局运行队列。
+
+局部运行队列就是每个P特有的长度为256的数组，该数组模拟了一个循环队列，其中runqhead标识了循环队列的开头，runqtail标识了循环队列的末尾。每次将G放入本地队列时，都从循环队列的末尾插入，而获取时从循环队列的头部获取。并且每个P内部还有一个特殊的runnext字段标识下一个要执行的协程，如果runnext不为空，则会直接执行runnext指向的协程，而不会去runq数组中寻找。
+
+被所有P共享的全局运行队列存储在schedt.runq中。
+
+```go
+//局部运行队列
+type p struct {
+    ...
+    // Queue of runnable goroutines. Accessed without lock.
+	runqhead uint32
+	runqtail uint32
+	runq     [256]guintptr
+	// runnext, if non-nil, is a runnable G that was ready'd by
+	// the current G and should be run next instead of what's in
+	// runq if there's time remaining in the running G's time
+	// slice. It will inherit the time left in the current time
+	// slice. If a set of goroutines is locked in a
+	// communicate-and-wait pattern, this schedules that set as a
+	// unit and eliminates the (potentially large) scheduling
+	// latency that otherwise arises from adding the ready'd
+	// goroutines to the end of the run queue.
+	//
+	// Note that while other P's may atomically CAS this to zero,
+	// only the owner P can CAS it to a valid G.
+	runnext guintptr
+    ...
+}
+
+//全局运行队列
+type schedt struct {
+    ...
+    // Global runnable queue.
+	runq     gQueue
+    ...
+}
+
+// A gQueue is a dequeue of Gs linked through g.schedlink. A G can only
+// be on one gQueue or gList at a time.
+type gQueue struct {
+	head guintptr
+	tail guintptr
+}
+```
+
+改进后的GMP模型：
+
+![image-20220830174006279](C:\Users\wanghao\AppData\Roaming\Typora\typora-user-images\image-20220830174006279.png)
+
+Go为了避免循环往复的执行局部队列的G而不执行全局队列的G使用了一种策略：P中每执行64次调度，就需要优先从全局队列获取一个G到当前P中，并执行下一个要执行的G。
+
+``` go
+	if gp == nil {
+		// Check the global runnable queue once in a while to ensure fairness.
+		// Otherwise two goroutines can completely occupy the local runqueue
+		// by constantly respawning each other.
+		if _g_.m.p.ptr().schedtick%61 == 0 && sched.runqsize > 0 {
+			lock(&sched.lock)
+			gp = globrunqget(_g_.m.p.ptr(), 1)
+			unlock(&sched.lock)
+		}
+	}
 ```
 
 
-
-## 14. 协程初探
-
-## 15. 协程设计和调度原理
 
 ## 16. 通道和协程通信
 
