@@ -98,7 +98,7 @@ FIELDS:
 
 statefulSet的回滚操作其实也是进行了一次发布更新。和发布更新的策略一样，更新 statefulset 后需要按照对应的策略手动删除 pod 或者修改 partition 字段以达到回滚 pod 的目的。但是要注意的是statefulSet对象回滚很简单，它使用的pv中保存的数据无法回滚。
 
-![https://s3-us-west-2.amazonaws.com/secure.notion-static.com/1d5525fa-141f-49f2-a001-2775e5a3f515/Untitled.png](https://s3-us-west-2.amazonaws.com/secure.notion-static.com/1d5525fa-141f-49f2-a001-2775e5a3f515/Untitled.png)
+![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/format-sts.png)
 
 ## 删除
 
@@ -161,20 +161,28 @@ Informer 通过 Kubernetes Watch API 监听某种 resource 下的所有事件。
 ### 关键逻辑解析：pod示例
 
 1. Informer 在初始化时，Reflector 会先 List API 获得所有的 Pod
+
 2. Reflect 拿到全部 Pod后，会将全部 Pod 放到 Store 中
+
 3. 如果有人调用 Lister 的 List/Get 方法获取 Pod， 那么 Lister 会直接从 Store 中拿数据
+
+   ![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/v2-61b6a728a7c18b608aa77b40d02f3042_720w.jpg)
+
 4. Informer 初始化完成之后，Reflector 开始 Watch Pod，监听 Pod 相关 的所有事件;如果此时 pod_1 被删除，那么 Reflector 会监听到这个事件
+
 5. Reflector 将 pod_1 被删除 的这个事件发送到 DeltaFIFO
+
 6. DeltaFIFO 首先会将这个事件存储在自己的数据结构中(实际上是一个 queue)，然后会直接操作 Store 中的数据，删除 Store 中的 pod_1
+
 7. DeltaFIFO 再 Pop 这个事件到 Controller 中
+
+   ![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/v2-a1a23b69f7fae636ca0cf72c80ad64f7_720w.jpg)
+
 8. Controller 收到这个事件，会触发 Processor 的回调函数
+
+   ![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/v2-b37f5ccf2fb67dfa58f6f04ce76b53a7_720w.jpg)
+
 9. LocalStore 会周期性地把所有的 Pod 信息重新放到 DeltaFIFO 中
-
-![https://s3-us-west-2.amazonaws.com/secure.notion-static.com/1d3b3236-60f2-49ae-ac10-558fee4081db/20170914090122.jpg](https://s3-us-west-2.amazonaws.com/secure.notion-static.com/1d3b3236-60f2-49ae-ac10-558fee4081db/20170914090122.jpg)
-
-![https://s3-us-west-2.amazonaws.com/secure.notion-static.com/1d7f0d75-c303-4251-9ae1-cdc15811a7e6/20170914090128.jpg](https://s3-us-west-2.amazonaws.com/secure.notion-static.com/1d7f0d75-c303-4251-9ae1-cdc15811a7e6/20170914090128.jpg)
-
-![https://s3-us-west-2.amazonaws.com/secure.notion-static.com/65e733db-c48c-4226-ae40-e0a8771448c0/20170914090134.jpg](https://s3-us-west-2.amazonaws.com/secure.notion-static.com/65e733db-c48c-4226-ae40-e0a8771448c0/20170914090134.jpg)
 
 ## sync方法
 

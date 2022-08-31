@@ -17,15 +17,15 @@ kube-apiserver 主要通过对外提供 API 的方式与其他组件进行交互
 
 API 的 URL 大致以 `/apis/group/version/namespaces/my-ns/myresource` 组成，其中 API 的结构大致如下图所示：
 
-![http://cdn.tianfeiyu.com/API-server-space-1.png](http://cdn.tianfeiyu.com/API-server-space-1.png)
+![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/API-server-space-1.png)
 
 了解了 kube-apiserver 的 API 后，下面介绍 kube-apiserver 如何处理一个 API 请求，一个请求完整的流程如下图所示：
 
-![http://cdn.tianfeiyu.com/API-server-flow-2.png](http://cdn.tianfeiyu.com/API-server-flow-2.png)
+![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/API-server-flow-2.png)
 
 此处以一次 POST 请求示例说明，当请求到达 kube-apiserver 时，kube-apiserver 首先会执行在 http filter chain 中注册的过滤器链，该过滤器对其执行一系列过滤操作，主要有认证、鉴权等检查操作。当 filter chain 处理完成后，请求会通过 route 进入到对应的 handler 中，handler 中的操作主要是与 etcd 的交互，在 handler 中的主要的操作如下所示：
 
-![http://cdn.tianfeiyu.com/API-server-storage-flow-2.png](http://cdn.tianfeiyu.com/API-server-storage-flow-2.png)
+![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/API-server-storage-flow-2.png)
 
 **Decoder**
 

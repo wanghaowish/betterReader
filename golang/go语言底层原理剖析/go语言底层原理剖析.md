@@ -1,7 +1,3 @@
----
-
----
-
 # go语言底层原理剖析
 
 ## 1. go语言编译器
@@ -92,7 +88,7 @@ type SliceHeader struct{
 
 切片的初始化需要用到make函数。可通过make函数指定长度和容量，不指定容量的情况下默认容量等于长度。使用数组创建slice时slice和原数组共用一部分内存。
 
-![img](https://raw.githubusercontent.com/wanghaowish/picGo/main/img/202207191423469.png)
+![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202207191423469.png)
 
 ```go
 //nil切片
@@ -102,7 +98,7 @@ silce := make( []int , 0 )
 slice := []int{ }
 ```
 
-![img](https://raw.githubusercontent.com/wanghaowish/picGo/main/img/202207191423045.png)
+![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202207191423045.png)
 
 空切片和 nil 切片的区别在于，空切片指向的地址不是nil，指向的是一个内存地址，但是它没有分配任何内存空间，即底层元素包含0个元素。
 
@@ -571,21 +567,21 @@ Go使用协程非常方便，只需要在特定的函数前加上关键字go即�
 
 ### 协程的状态
 
-![image-20220830150027066](C:\Users\wanghao\AppData\Roaming\Typora\typora-user-images\image-20220830150027066.png)
+![image-20220830150027066](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/image-20220830150027066.png)
 
-* Gidle为协程刚开始创建时的状态，当新创建的协程初始化后，会变为Gdead的状态，_Gdead状态也是协程被销毁时的状态。
+* `_Gidle`为协程刚开始创建时的状态，当新创建的协程初始化后，会变为`_Gdead`的状态，`_Gdead`状态也是协程被销毁时的状态。
 
-* _Grunnable表示当前协程在运行队列中，正在等待运行
+* `_Grunnable`表示当前协程在运行队列中，正在等待运行
 
-* _Grunning代表当前协程正在被运行，已经被分配给了逻辑处理器和线程
+* `_Grunning`代表当前协程正在被运行，已经被分配给了逻辑处理器和线程
 
-* _Gwaiting表示当前协程在运行时被锁定，不能执行用户代码。在垃圾回收及channel通信时经常会遇到这种情况。
+* `_Gwaiting`表示当前协程在运行时被锁定，不能执行用户代码。在垃圾回收及channel通信时经常会遇到这种情况。
 
-* _Gsyscall代表当前协程正在执行系统调用
+* `_Gsyscall`代表当前协程正在执行系统调用
 
-* _Gpreempted是Go1.14新加的状态，代表协程G被强制抢占后的状态
+* `_Gpreempted`是Go1.14新加的状态，代表协程G被强制抢占后的状态
 
-* _Gcopystack代表在进行协程栈扫描时发现需要扩容或缩小协程栈空间，将协程中的栈转移到新栈时的状态。
+* `_Gcopystack`代表在进行协程栈扫描时发现需要扩容或缩小协程栈空间，将协程中的栈转移到新栈时的状态。
 
 还有几个状态（**_Gscan**,**_Gscanrunnable**,**_Gscanrunning**等）涉及垃圾回收阶段。
 
@@ -597,7 +593,7 @@ Go使用协程非常方便，只需要在特定的函数前加上关键字go即�
 
 ### 调度循环
 
-![image-20220830161300798](C:\Users\wanghao\AppData\Roaming\Typora\typora-user-images\image-20220830161300798.png)
+![image-20220830161300798](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/image-20220830161300798.png)
 
 调度循环指从调度协程g0开始，找到接下来要运行的协程g、正在从协程g切换到协程g0开始新一轮调度的过程。
 
@@ -657,9 +653,9 @@ type gQueue struct {
 
 改进后的GMP模型：
 
-![image-20220830174006279](C:\Users\wanghao\AppData\Roaming\Typora\typora-user-images\image-20220830174006279.png)
+![image-20220830174006279](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/image-20220830174006279.png)
 
-Go为了避免循环往复的执行局部队列的G而不执行全局队列的G使用了一种策略：P中每执行64次调度，就需要优先从全局队列获取一个G到当前P中，并执行下一个要执行的G。
+Go为了避免循环往复的执行局部队列的G而不执行全局队列的G使用了一种策略：P中每执行61次调度，就需要优先从全局队列获取一个G到当前P中，并执行下一个要执行的G。
 
 ``` go
 	if gp == nil {
@@ -671,9 +667,217 @@ Go为了避免循环往复的执行局部队列的G而不执行全局队列的G�
 			gp = globrunqget(_g_.m.p.ptr(), 1)
 			unlock(&sched.lock)
 		}
+	} 
+```
+
+调度协程的优先级如下图所示。排除从全局运行队列获取的情况下，每个P在执行调度时都会先尝试从runnext中获取下一个要执行的G，如果runnext为空，则从局部运行队列runq获取，如果runq为空就会从全局运行队列schet.runq获取G，如果还没有，那就会尝试从其他P窃取可用的协程。如果窃取不到任务，那么当前的P会与M解除绑定，P会放入到空闲的P队列中，解除绑定的M会进入休眠。
+
+![image-20220831150802448](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/image-20220831150802448.png)
+
+#### 获取本地运行队列runq
+
+当qunhead!=runtail，就表明当前的本地运行队列有可用的G。在这里的访问需要加锁。
+
+#### 获取schet.runq的G
+
+全局运行队列的数据结构是一根链表。由于每个P都共享的全局运行队列，因此为了保证公平，先根据P的数量平分全局运行队列，同时转移的G的数量不能超过局部运行队列容量的一半（当前是256/2=128个）。再通过循环调用runqput将全局队列的G放入到P的局部运行队列。如果runq已经满了，那么调度器会将runq的一半放入到全局运行队列，这保证了当程序中以后很多协程时，每个协程都有执行的机会。
+
+#### 获取准备就绪的网络协程
+
+当p.runq和schet.runq都找不到可用协程时，调度器会寻找当前是否有已经准备好运行的网络协程。runtime.netpoll函数获取当前可运行的协程列表，返回第一个协程并通过injectglist函数将其余协程放入全局运行队列。
+
+```go
+	// Poll network.
+	// This netpoll is only an optimization before we resort to stealing.
+	// We can safely skip it if there are no waiters or a thread is blocked
+	// in netpoll already. If there is any kind of logical race with that
+	// blocked thread (e.g. it has already returned from netpoll, but does
+	// not set lastpoll yet), this thread will do blocking netpoll below
+	// anyway.
+	if netpollinited() && atomic.Load(&netpollWaiters) > 0 && atomic.Load64(&sched.lastpoll) != 0 {
+		if list := netpoll(0); !list.empty() { // non-blocking
+			gp := list.pop()
+			injectglist(&list)
+			casgstatus(gp, _Gwaiting, _Grunnable)
+			if trace.enabled {
+				traceGoUnpark(gp, 0)
+			}
+			return gp, false
+		}
 	}
 ```
 
+#### 协程窃取
+
+所有的P都存储在全局的allp []*p中。为了既保证随机性，又保证allp数组中的每个P都能被依次遍历，有了fastrand函数。
+
+假设一共有8个P，第1步：fastrand函数新选择一个随机数对8进行取模，假设算法选择了6。第2步：找到一个比8小且与8互质的数。[1,3,5,7]。代码中取的是coprimes[6%4]=coprimes[2]=5。计算过程为：
+
+```go
+(6+5)%8=3
+(3+5)%8=0 (0+5)%8=5 (5+5)%8=2 (2+5)%8=7 (7+5)%8=4 (4+5)%8=1
+(1+5)%86
+```
+
+所以这种数学特性既保证随机性，又保证allp数组中的每个P都能被依次遍历。找到了要窃取的P之后就是将要窃取的P的本地运行队列中G个数的一半放入自己的运行队列中。
+
+```go
+// Finds a runnable goroutine to execute.
+// Tries to steal from other P's, get g from local or global queue, poll network.
+func findrunnable() (gp *g, inheritTime bool) {
+    ...
+	// Spinning Ms: steal work from other Ps.
+	//
+	// Limit the number of spinning Ms to half the number of busy Ps.
+	// This is necessary to prevent excessive CPU consumption when
+	// GOMAXPROCS>>1 but the program parallelism is low.
+	procs := uint32(gomaxprocs)
+	if _g_.m.spinning || 2*atomic.Load(&sched.nmspinning) < procs-atomic.Load(&sched.npidle) {
+		if !_g_.m.spinning {
+			_g_.m.spinning = true
+			atomic.Xadd(&sched.nmspinning, 1)
+		}
+
+		gp, inheritTime, tnow, w, newWork := stealWork(now)
+		now = tnow
+		if gp != nil {
+			// Successfully stole.
+			return gp, inheritTime
+		}
+		if newWork {
+			// There may be new timer or GC work; restart to
+			// discover.
+			goto top
+		}
+		if w != 0 && (pollUntil == 0 || w < pollUntil) {
+			// Earlier timer to wait for.
+			pollUntil = w
+		}
+	}
+    ...
+}
+
+// stealWork attempts to steal a runnable goroutine or timer from any P.
+//
+// If newWork is true, new work may have been readied.
+//
+// If now is not 0 it is the current time. stealWork returns the passed time or
+// the current time if now was passed as 0.
+func stealWork(now int64) (gp *g, inheritTime bool, rnow, pollUntil int64, newWork bool) {
+	pp := getg().m.p.ptr()
+
+	ranTimer := false
+
+	const stealTries = 4
+	for i := 0; i < stealTries; i++ {
+		stealTimersOrRunNextG := i == stealTries-1
+
+		for enum := stealOrder.start(fastrand()); !enum.done(); enum.next() {
+			if sched.gcwaiting != 0 {
+				// GC work may be available.
+				return nil, false, now, pollUntil, true
+			}
+			p2 := allp[enum.position()]
+			if pp == p2 {
+				continue
+			}
+
+			// Steal timers from p2. This call to checkTimers is the only place
+			// where we might hold a lock on a different P's timers. We do this
+			// once on the last pass before checking runnext because stealing
+			// from the other P's runnext should be the last resort, so if there
+			// are timers to steal do that first.
+			//
+			// We only check timers on one of the stealing iterations because
+			// the time stored in now doesn't change in this loop and checking
+			// the timers for each P more than once with the same value of now
+			// is probably a waste of time.
+			//
+			// timerpMask tells us whether the P may have timers at all. If it
+			// can't, no need to check at all.
+			if stealTimersOrRunNextG && timerpMask.read(enum.position()) {
+				tnow, w, ran := checkTimers(p2, now)
+				now = tnow
+				if w != 0 && (pollUntil == 0 || w < pollUntil) {
+					pollUntil = w
+				}
+				if ran {
+					// Running the timers may have
+					// made an arbitrary number of G's
+					// ready and added them to this P's
+					// local run queue. That invalidates
+					// the assumption of runqsteal
+					// that it always has room to add
+					// stolen G's. So check now if there
+					// is a local G to run.
+					if gp, inheritTime := runqget(pp); gp != nil {
+						return gp, inheritTime, now, pollUntil, ranTimer
+					}
+					ranTimer = true
+				}
+			}
+
+			// Don't bother to attempt to steal if p2 is idle.
+			if !idlepMask.read(enum.position()) {
+				if gp := runqsteal(pp, p2, stealTimersOrRunNextG); gp != nil {
+					return gp, false, now, pollUntil, ranTimer
+				}
+			}
+		}
+	}
+
+	// No goroutines found to steal. Regardless, running a timer may have
+	// made some goroutine ready that we missed. Indicate the next timer to
+	// wait for.
+	return nil, false, now, pollUntil, ranTimer
+}
+```
+
+### 调度时机
+
+调度时机根据调度方式的不同可以分为主动、被动和抢占调度三种。
+
+#### 主动调度
+
+协程可以主动让渡自己的执行权利。通过runtime.Gosched函数实现。原理就是先从当前协程切换到g0，取消G和M的绑定关系，将G放入全局运行队列，并调用schedule函数进行新一轮调度。
+
+#### 被动调度
+
+被动调度指协程在休眠、channel通道阻塞、网络I/O阻塞、执行垃圾回收而暂停时，被动让渡自己执行权利的过程。被动调度具有重大意义，可以保证最大化利用CPU的资源。被动调度也需要先从当前协程切换到g0，更新协程的状态并解绑与M的关系，重新调度，但是被动调度不会将G放入全局队列，当前G的状态也不是`_Grunnable`而是`_Gwaitting`。如果当前协程需要被唤醒，那么会先将协程的状态从`_Gwaitting`转换为`_Grunnable`，并添加到当前P的局部运行队列中。
+
+#### 抢占调度
+
+Go语言在初始化时会启动一个特殊的线程来执行系统监控任务。系统监控在一个独立的M上运行，不用绑定逻辑处理器P，系统监控每隔10ms会检测是否有准备就绪的网络协程，并放置到全局队列中。系统监控服务会判断当前协程是否运行时间过长，或者处于系统调用阶段，如果是，则会抢占当前G的执行。
+
+##### 执行时间过长的抢占
+
+Go在1.14之后引入了信号强制抢占的机制。Go语言借助用户态在信号处理时完成协程的上下文切换的操作，需要借助进程对特定的信号进行处理。在抢占时，调度器通过向线程发送sigPreempt信号，触发信号处理。在遇到sigPreempt抢占信号时，触发运行时的异步抢占机制。
+
+##### 系统调用的抢占
+
+发生系统调用时有三种情况需要抢占调度：
+
+* 当前局部运行队列中有等待运行的G。这种情况下，抢占调度只是为了让局部运行队列中的协程有运行的机会，其一般是当前P私有的。
+
+* 当前没有空闲的P和自旋的M。如果有空闲的P和自旋的M，说明当前比较空闲，那么释放当前的P也没有太大意义。
+
+* 当前系统调用的时间已经超过了10ms，这时需要立即抢占。
+
+系统调用时的抢占原理主要是通过将P的状态转化为_Pidle。目的是让M接管P的执行，主要逻辑位于handoffp函数中，该函数需要判断是否需要找到一个新的M来接管当前的P。以下情况需要启动一个M来接管：
+
+* 本地运行队列有等待运行的G
+
+* 需要处理一些垃圾回收的后台任务
+
+* 所有其他P都在运行G，并且没有自旋的M
+
+* 全局运行队列不为空
+
+* 需要处理网络socket读写等事件
+
+当这些条件都不满足时，才会将当前的P放入空闲队列中。寻找可用的M时，需要现在M的空闲列表查找，如果没有，则向操作系统申请一个新的M。
+
+执行系统调用之前，运行时调用了reentersyscall函数，保存当前G的执行环境，并解除P与M之间的绑定，将P放置到oldp中。接解除绑定是为了系统调用返回后，当前线程能够绑定不同的P，但是会优先选择oldp。工作线程的P被抢占，系统调用的工作线程从内核返回后，被阻塞的协程继续执行，调用exitsyscall函数以便协程重新执行。exitsyscalll函数会尝试绑定oldp，当P不可用，加锁从全局空闲队列寻找空闲的P。如果空闲队列没有空闲的P，则会将当前的G放入全局运行队列，当前工作线程M进入休眠状态。
 
 
 ## 16. 通道和协程通信
