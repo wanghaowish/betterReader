@@ -233,7 +233,7 @@ tophash此字段顺序存储key的hash值的前8位。桶在存储的taophash字
 
 ### map原理图解
 
-![image-20200919191800912](https://raw.githubusercontent.com/wanghaowish/picGo/main/img/202207251349167.png)
+![image-20200919191800912](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202207251349167.png)
 
 - 创建map
 
