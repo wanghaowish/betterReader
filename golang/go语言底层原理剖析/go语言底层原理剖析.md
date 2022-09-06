@@ -41,7 +41,7 @@ shopspring/decimal 第三方库，在处理货币方面有一定优势
 
 const关键字声明常量，声明时可以指定或者忽略类型。等号左边的叫命名常量，等号右边的叫未命名常量，未命名常量只会在编译期间存在，因此不会存在在内存中。命名常存在内存静态只读区， 不能被修改。go语言禁止对常量进行取地址操作。
 
-隐式类型转换的规则是有类型常量优先于无类型。无 类型常量运算时的优先级为：复数(Imag)>浮点数(float)>符文数(rune)>整数(int)
+隐式类型转换的规则是有类型常量优先于无类型。无类型常量运算时的优先级为：复数(Imag)>浮点数(float)>符文数(rune)>整数(int)
 
 ## 5. 字符串的本质与实现
 
@@ -879,10 +879,271 @@ Go在1.14之后引入了信号强制抢占的机制。Go语言借助用户态在
 
 执行系统调用之前，运行时调用了reentersyscall函数，保存当前G的执行环境，并解除P与M之间的绑定，将P放置到oldp中。接解除绑定是为了系统调用返回后，当前线程能够绑定不同的P，但是会优先选择oldp。工作线程的P被抢占，系统调用的工作线程从内核返回后，被阻塞的协程继续执行，调用exitsyscall函数以便协程重新执行。exitsyscalll函数会尝试绑定oldp，当P不可用，加锁从全局空闲队列寻找空闲的P。如果空闲队列没有空闲的P，则会将当前的G放入全局运行队列，当前工作线程M进入休眠状态。
 
-
 ## 16. 通道和协程通信
 
+### 通道
+
+普通的通道类型可以转换为单方向的通道，反之不可以。
+
+#### 初始化
+
+chan作为Go语言中的类型，最基本的声明方式如下：
+
+```go
+var name chan T
+```
+
+name代表通道的名称，chan T代表通道的类型，T代表通道中的元素类型。通道的表现形式有三种：chan T、chan <- T、 -> chan T。不带箭头的可读可写，带箭头的类型限制了通道的读写。要对通道进行操作，需要使用make操作符分配通道空间。
+
+#### 写入
+
+`c <- 5`对于无缓冲通道，能够向通道写入数据的前提是必须有另一个协程在读取通道。否欧泽当前通道会陷入休眠状态，知道能够向通道成功写入数据。无缓冲通道的读与写应该在不同协程当中。
+
+#### 读取
+
+`<- c`可以读取通道的数据。和写入数据一样，如果不能直接读取通道的数据，那么当前的读取协程会陷入阻塞，知道有协程写入通道为止。读取通道可以有两个返回值，第一个返回值返回通道的数据，第二个返回bool类型。`data,ok:= <- c`。
+
+#### 关闭
+
+通道可以使用内置的close函数关闭。关闭的通道可以读取，但是不能写入。
+
+* 对一个关闭的通道再发送值就会导致panic。
+
+* 对一个关闭的通道进行接收会一直获取值直到通道为空。
+
+* 对一个关闭的并且没有值的通道执行接收操作会得到对应类型的零值。
+
+* 关闭一个已经关闭的通道会导致panic。
+
+### select多路复用
+
+select通常和通道结合使用，他的每一个case都必须对应通道的读写操作。当多个通道同时准备好执行读写操作，select的执行具有一定的随机性，case是随机选取的。如果select中没有任何通道准备好，当前select所在的协程将会阻塞直到有一个case的通道准备好为止。
+
+### channel的原理
+
+```go
+type hchan struct {
+	qcount   uint           // total data in the queue 队列中的总元素个数
+	dataqsiz uint           // size of the circular queue 环形队列大小，即可存放元素的个数
+	buf      unsafe.Pointer // points to an array of dataqsiz elements  环形队列指针
+	elemsize uint16 //每个元素的大小
+	closed   uint32 //标识关闭状态
+	elemtype *_type // element type  元素类型
+	sendx    uint   // send index 发送索引，元素写入时存放到队列中的位置
+	recvx    uint   // receive index 接收索引，元素从队列的该位置读出
+	recvq    waitq  // list of recv waiters  等待读消息的goroutine队列
+	sendq    waitq  // list of send waiters 等待写消息的goroutine队列
+
+	// lock protects all fields in hchan, as well as several
+	// fields in sudogs blocked on this channel.
+	//
+	// Do not change another G's status while holding this lock
+	// (in particular, do not ready a G), as this can deadlock
+	// with stack shrinking.
+	lock mutex //互斥锁，chan不允许并发读写
+}
+```
+
+**读写流程**
+
+**向 channel 写数据:**
+
+* 若等待接收队列 recvq 不为空，则缓冲区中无数据或无缓冲区，将直接从 recvq 取出 G ，并把数据写入，最后把该 G 唤醒，结束发送过程。
+
+* 若缓冲区中有空余位置，则将数据写入缓冲区，结束发送过程。
+
+* 若缓冲区中没有空余位置，则将发送数据写入 G，将当前 G 加入 sendq 链表末尾，进入睡眠，等待被读 goroutine 唤醒。
+
+**从 channel 读数据**
+
+* 若等待发送队列 sendq 不为空，且没有缓冲区，直接从 sendq 中取出 G ，把 G 中数据读出，最后把 G 唤醒，结束读取过程。
+* 如果缓冲区中有数据，则从缓冲区取出数据，结束读取过程。
+
+* 如果当前通道无缓冲区或者缓冲区是空的，
+
+* 将当前G 加入 recvq 链表末尾，进入睡眠，等待被写 goroutine 唤醒。
+
+### select原理
+
+select中的每个case在运行时都是一个scase结构体，存放了通道和通道中的元素类型等信息。
+
+```go
+// Select case descriptor.
+// Known to compiler.
+// Changes here must also be made in src/cmd/compile/internal/walk/select.go's scasetype.
+type scase struct {
+	c    *hchan         // chan
+	elem unsafe.Pointer // data element
+}
+
+//依次解锁
+func sellock(scases []scase, lockorder []uint16) {
+	var c *hchan
+	for _, o := range lockorder {
+		c0 := scases[o].c
+		if c0 != c {
+			c = c0
+			lock(&c.lock)
+		}
+	}
+}
+
+//依次加锁
+func selunlock(scases []scase, lockorder []uint16) {
+	// We must be very careful here to not touch sel after we have unlocked
+	// the last lock, because sel can be freed right after the last unlock.
+	// Consider the following situation.
+	// First M calls runtime·park() in runtime·selectgo() passing the sel.
+	// Once runtime·park() has unlocked the last lock, another M makes
+	// the G that calls select runnable again and schedules it for execution.
+	// When the G runs on another M, it locks all the locks and frees sel.
+	// Now if the first M touches sel, it will access freed memory.
+	for i := len(lockorder) - 1; i >= 0; i-- {
+		c := scases[lockorder[i]].c
+		if i > 0 && c == scases[lockorder[i-1]].c {
+			continue // will unlock it on the next iteration
+		}
+		unlock(&c.lock)
+	}
+}
+
+// selectgo implements the select statement.
+//
+// cas0 points to an array of type [ncases]scase, and order0 points to
+// an array of type [2*ncases]uint16 where ncases must be <= 65536.
+// Both reside on the goroutine's stack (regardless of any escaping in
+// selectgo).
+//
+// For race detector builds, pc0 points to an array of type
+// [ncases]uintptr (also on the stack); for other builds, it's set to
+// nil.
+//
+// selectgo returns the index of the chosen scase, which matches the
+// ordinal position of its respective select{recv,send,default} call.
+// Also, if the chosen scase was a receive operation, it reports whether
+// a value was received.
+func selectgo(cas0 *scase, order0 *uint16, pc0 *uintptr, nsends, nrecvs int, block bool) (int, bool) {
+	...
+	// NOTE: In order to maintain a lean stack size, the number of scases
+	// is capped at 65536.
+	cas1 := (*[1 << 16]scase)(unsafe.Pointer(cas0))
+	order1 := (*[1 << 17]uint16)(unsafe.Pointer(order0))
+
+	ncases := nsends + nrecvs
+	scases := cas1[:ncases:ncases]
+	pollorder := order1[:ncases:ncases]
+	lockorder := order1[ncases:][:ncases:ncases]
+	// NOTE: pollorder/lockorder's underlying array was not zero-initialized by compiler.
+
+	// Even when raceenabled is true, there might be select
+	// statements in packages compiled without -race (e.g.,
+	// ensureSigM in runtime/signal_unix.go).
+	var pcs []uintptr
+	if raceenabled && pc0 != nil {
+		pc1 := (*[1 << 16]uintptr)(unsafe.Pointer(pc0))
+		pcs = pc1[:ncases:ncases]
+	}
+	casePC := func(casi int) uintptr {
+		if pcs == nil {
+			return 0
+		}
+		return pcs[casi]
+	}
+
+	var t0 int64
+	if blockprofilerate > 0 {
+		t0 = cputicks()
+	}
+
+	// generate permuted order
+	norder := 0
+	for i := range scases {
+		cas := &scases[i]
+
+		// Omit cases without channels from the poll and lock orders.
+		if cas.c == nil {
+			cas.elem = nil // allow GC
+			continue
+		}
+
+		j := fastrandn(uint32(norder + 1))
+		pollorder[norder] = pollorder[j]
+		pollorder[j] = uint16(i)
+		norder++
+	}
+	pollorder = pollorder[:norder]
+	lockorder = lockorder[:norder]
+	
+    //堆排序操作
+	// sort the cases by Hchan address to get the locking order.
+	// simple heap sort, to guarantee n log n time and constant stack footprint.
+	for i := range lockorder {
+		j := i
+		// Start with the pollorder to permute cases on the same channel.
+		c := scases[pollorder[i]].c
+		for j > 0 && scases[lockorder[(j-1)/2]].c.sortkey() < c.sortkey() {
+			k := (j - 1) / 2
+			lockorder[j] = lockorder[k]
+			j = k
+		}
+		lockorder[j] = pollorder[i]
+	}
+	for i := len(lockorder) - 1; i >= 0; i-- {
+		o := lockorder[i]
+		c := scases[o].c
+		lockorder[i] = lockorder[0]
+		j := 0
+		for {
+			k := j*2 + 1
+			if k >= i {
+				break
+			}
+			if k+1 < i && scases[lockorder[k]].c.sortkey() < scases[lockorder[k+1]].c.sortkey() {
+				k++
+			}
+			if c.sortkey() < scases[lockorder[k]].c.sortkey() {
+				lockorder[j] = lockorder[k]
+				j = k
+				continue
+			}
+			break
+		}
+		lockorder[j] = o
+	}
+	...
+
+	// lock all the channels involved in the select
+	sellock(scases, lockorder)
+	...
+}
+
+// 伪代码
+func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
+    //1. 锁定scase语句中所有的channel
+    //2. 按照随机顺序检测scase中的channel是否ready
+    //   2.1 如果case可读，则读取channel中数据，解锁所有的channel，然后返回(case index, true)
+    //   2.2 如果case可写，则将数据写入channel，解锁所有的channel，然后返回(case index, false)
+    //   2.3 所有case都未ready，则解锁所有的channel，然后返回（default index, false）
+    //3. 所有case都未ready，且没有default语句
+    //   3.1 将当前协程加入到所有channel的等待队列
+    //   3.2 当将协程转入阻塞，等待被唤醒
+    //4. 唤醒后返回channel对应的case index
+    //   4.1 如果是读操作，解锁所有的channel，然后返回(case index, true)
+    //   4.2 如果是写操作，解锁所有的channel，然后返回(case index, false)
+}
+```
+
+selectgo函数当中，pollorder代表乱序后的scase序列，轮询需要乱序保证公平性。lockorder是按照大小对通道地址排序的算法，对所有的scase按照其通道在堆区的地址大小，使用了大根堆排序算法进行排序，selectgo会按照lockorder序列依次加锁，按照地址排序的目的是为了避免多个协程并发加锁带来的死锁问题。
+
+* order0 为一个两倍 cas0 数组长度的 buffer，保存 scase 随机序列 pollorder 和 scase 中 channel 地址序列 lockorder
+
+* pollorder：每次selectgo执行都会把scase序列打乱，以达到随机检测case的目的
+
+* lockorder：所有case语句中channel序列，以达到去重防止对channel加锁时重复加锁的目的
+
 ## 17. 并发
+
+
 
 ## 18. 内存分配管理
 
