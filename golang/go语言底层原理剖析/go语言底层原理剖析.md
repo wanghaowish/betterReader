@@ -118,7 +118,7 @@ append函数可以添加新元素到切片的末尾，它可以接受可变长�
 
 如果切片的容量小于 1024 个元素，于是扩容的时候就翻倍增加容量。上面那个例子也验证了这一情况，总容量从原来的4个翻倍到现在的8个。
 
-一旦元素个数超过 1024 个元素，那么增长因子就变成 1.25 ，即每次增加原来容量的四分之一。
+一旦元素个数超过 1024 个元素，那么增长因子就变成 1.25 ，即每 次增加原来容量的四分之一。
 
 注意：扩容扩大的容量都是针对原来的容量而言的，而不是针对原来数组的长度而言的。
 
@@ -1143,11 +1143,1363 @@ selectgo函数当中，pollorder代表乱序后的scase序列，轮询需要乱�
 
 ## 17. 并发
 
+### context
 
+为了能够优雅的管理协程的退出，特别是多个协程甚至网络服务之间的退出，Go引入了context包。
+
+#### context使用
+
+```go
+
+// A Context carries a deadline, a cancellation signal, and other values across
+// API boundaries.
+//
+// Context's methods may be called by multiple goroutines simultaneously.
+type Context interface {
+	// Deadline returns the time when work done on behalf of this context
+	// should be canceled. Deadline returns ok==false when no deadline is
+	// set. Successive calls to Deadline return the same results.
+	Deadline() (deadline time.Time, ok bool)
+
+	// Done returns a channel that's closed when work done on behalf of this
+	// context should be canceled. Done may return nil if this context can
+	// never be canceled. Successive calls to Done return the same value.
+	// The close of the Done channel may happen asynchronously,
+	// after the cancel function returns.
+	//
+	// WithCancel arranges for Done to be closed when cancel is called;
+	// WithDeadline arranges for Done to be closed when the deadline
+	// expires; WithTimeout arranges for Done to be closed when the timeout
+	// elapses.
+	//
+	// Done is provided for use in select statements:
+	//
+	//  // Stream generates values with DoSomething and sends them to out
+	//  // until DoSomething returns an error or ctx.Done is closed.
+	//  func Stream(ctx context.Context, out chan<- Value) error {
+	//  	for {
+	//  		v, err := DoSomething(ctx)
+	//  		if err != nil {
+	//  			return err
+	//  		}
+	//  		select {
+	//  		case <-ctx.Done():
+	//  			return ctx.Err()
+	//  		case out <- v:
+	//  		}
+	//  	}
+	//  }
+	//
+	// See https://blog.golang.org/pipelines for more examples of how to use
+	// a Done channel for cancellation.
+	Done() <-chan struct{}
+
+	// If Done is not yet closed, Err returns nil.
+	// If Done is closed, Err returns a non-nil error explaining why:
+	// Canceled if the context was canceled
+	// or DeadlineExceeded if the context's deadline passed.
+	// After Err returns a non-nil error, successive calls to Err return the same error.
+	Err() error
+
+	// Value returns the value associated with this context for key, or nil
+	// if no value is associated with key. Successive calls to Value with
+	// the same key returns the same result.
+	//
+	// Use context values only for request-scoped data that transits
+	// processes and API boundaries, not for passing optional parameters to
+	// functions.
+	//
+	// A key identifies a specific value in a Context. Functions that wish
+	// to store values in Context typically allocate a key in a global
+	// variable then use that key as the argument to context.WithValue and
+	// Context.Value. A key can be any type that supports equality;
+	// packages should define keys as an unexported type to avoid
+	// collisions.
+	//
+	// Packages that define a Context key should provide type-safe accessors
+	// for the values stored using that key:
+	//
+	// 	// Package user defines a User type that's stored in Contexts.
+	// 	package user
+	//
+	// 	import "context"
+	//
+	// 	// User is the type of value stored in the Contexts.
+	// 	type User struct {...}
+	//
+	// 	// key is an unexported type for keys defined in this package.
+	// 	// This prevents collisions with keys defined in other packages.
+	// 	type key int
+	//
+	// 	// userKey is the key for user.User values in Contexts. It is
+	// 	// unexported; clients use user.NewContext and user.FromContext
+	// 	// instead of using this key directly.
+	// 	var userKey key
+	//
+	// 	// NewContext returns a new Context that carries value u.
+	// 	func NewContext(ctx context.Context, u *User) context.Context {
+	// 		return context.WithValue(ctx, userKey, u)
+	// 	}
+	//
+	// 	// FromContext returns the User value stored in ctx, if any.
+	// 	func FromContext(ctx context.Context) (*User, bool) {
+	// 		u, ok := ctx.Value(userKey).(*User)
+	// 		return u, ok
+	// 	}
+	Value(key interface{}) interface{}
+}
+```
+
+Deadline方法的第一个返回值表示还有多久到期，第二个返回值表示是否到期。Done是使用最频繁的方法，其返回一个通道，一般的做法是监听该通道的信号，如果收到信号则表示通道已经关闭，需要执行退出。如果通道已经关闭，则Err()方法返回退出的原因。value方法返回指定key对应的value，这是context携带的值。
+
+context携带值比较少见，一般在跨程序的API中使用，并且该值的作用域在结束时终结。key必须是访问安全的，因为可能有多个协程同时访问他。Value主要用于安全凭证、分布式跟踪ID、操作优先级、退出信号与到期时间等场景。使用value方法时要慎重。
+
+#### context退出与传递
+
+context.Background函数或者context.TODO函数会返回最简单的context实现。
+
+```go
+// WithCancel returns a copy of parent with a new Done channel. The returned
+// context's Done channel is closed when the returned cancel function is called
+// or when the parent context's Done channel is closed, whichever happens first.
+//
+// Canceling this context releases resources associated with it, so code should
+// call cancel as soon as the operations running in this Context complete.
+func WithCancel(parent Context) (ctx Context, cancel CancelFunc) {}
+
+// WithTimeout returns WithDeadline(parent, time.Now().Add(timeout)).
+//
+// Canceling this context releases resources associated with it, so code should
+// call cancel as soon as the operations running in this Context complete:
+//
+// 	func slowOperationWithTimeout(ctx context.Context) (Result, error) {
+// 		ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+// 		defer cancel()  // releases resources if slowOperation completes before timeout elapses
+// 		return slowOperation(ctx)
+// 	}
+func WithTimeout(parent Context, timeout time.Duration) (Context, CancelFunc) {}
+
+// WithDeadline returns a copy of the parent context with the deadline adjusted
+// to be no later than d. If the parent's deadline is already earlier than d,
+// WithDeadline(parent, d) is semantically equivalent to parent. The returned
+// context's Done channel is closed when the deadline expires, when the returned
+// cancel function is called, or when the parent context's Done channel is
+// closed, whichever happens first.
+//
+// Canceling this context releases resources associated with it, so code should
+// call cancel as soon as the operations running in this Context complete.
+func WithDeadline(parent Context, d time.Time) (Context, CancelFunc) {}
+
+// WithValue returns a copy of parent in which the value associated with key is
+// val.
+//
+// Use context Values only for request-scoped data that transits processes and
+// APIs, not for passing optional parameters to functions.
+//
+// The provided key must be comparable and should not be of type
+// string or any other built-in type to avoid collisions between
+// packages using context. Users of WithValue should define their own
+// types for keys. To avoid allocating when assigning to an
+// interface{}, context keys often have concrete type
+// struct{}. Alternatively, exported context key variables' static
+// type should be a pointer or interface.
+func WithValue(parent Context, key, val interface{}) Context {}
+```
+
+* WithCancel函数返回一个子context并且有cancel退出方法。子context调用cancel方法或者父context退出时都会退出。
+
+* WithTimeout函数指定超时时间，当超时发生后，子context会退出。
+
+* WithDeadline和WithTimeout处理方法相似。参数指的是最后到期的时间。
+
+* WithValue函数返回带key-value的子context。
+
+子context的退出不会影响父context。
+
+#### context原理
+
+context很大程度上利用了通道在close时会通知所有监听它的协程这一特性。
+
+* context.Background函数和context.TODO函数是相似的。它们都返回一个emptyCtx。作为最初始的根对象。
+
+* WithCancel或WithTimeout函数会产生一个子context结构cancelCtx，并保留了父context的信息。children字段保存当前context之后派生的子context的信息。每个context都会有一个新的通道，这保证了子context的退出不会影响父context。
+
+  ```go
+  // A cancelCtx can be canceled. When canceled, it also cancels any children
+  // that implement canceler.
+  type cancelCtx struct {
+  	Context
+  
+  	mu       sync.Mutex            // protects following fields
+  	done     atomic.Value          // of chan struct{}, created lazily, closed by first cancel call
+  	children map[canceler]struct{} // set to nil by the first cancel call
+  	err      error                 // set to non-nil by the first cancel call
+  }
+  ```
+
+  WithTimeout函数最终会调用WithDeadline函数的方法。
+
+WithDeadline函数源码解析:
+
+```go
+// WithDeadline returns a copy of the parent context with the deadline adjusted
+// to be no later than d. If the parent's deadline is already earlier than d,
+// WithDeadline(parent, d) is semantically equivalent to parent. The returned
+// context's Done channel is closed when the deadline expires, when the returned
+// cancel function is called, or when the parent context's Done channel is
+// closed, whichever happens first.
+//
+// Canceling this context releases resources associated with it, so code should
+// call cancel as soon as the operations running in this Context complete.
+func WithDeadline(parent Context, d time.Time) (Context, CancelFunc) {
+	if parent == nil {
+		panic("cannot create context from nil parent")
+	}
+    //判断父context是否比当前设置的超时参数d先退出，如果是那么子context随着父context退出而退出。
+	if cur, ok := parent.Deadline(); ok && cur.Before(d) {
+		// The current deadline is already sooner than the new one.
+		return WithCancel(parent)
+	}
+    //创建一个新的context，初始化通道
+	c := &timerCtx{
+		cancelCtx: newCancelCtx(parent),
+		deadline:  d,
+	}
+    //将子context加入到父协程的children哈希表，并开启一个定时器
+	propagateCancel(parent, c)
+    //定时器是否到期
+	dur := time.Until(d)
+	if dur <= 0 {
+		c.cancel(true, DeadlineExceeded) // deadline has already passed
+		return c, func() { c.cancel(false, Canceled) }
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err == nil {
+		c.timer = time.AfterFunc(dur, func() {
+			c.cancel(true, DeadlineExceeded)
+		})
+	}
+    //当一切结束后，还需要从父context哈希表中移除该context
+	return c, func() { c.cancel(true, Canceled) }
+}
+
+// propagateCancel arranges for child to be canceled when parent is.
+func propagateCancel(parent Context, child canceler) {
+	done := parent.Done()
+	if done == nil {
+		return // parent is never canceled
+	}
+
+	select {
+	case <-done:
+		// parent is already canceled
+		child.cancel(false, parent.Err())
+		return
+	default:
+	}
+
+	if p, ok := parentCancelCtx(parent); ok {
+		p.mu.Lock()
+		if p.err != nil {
+			// parent has already been canceled
+			child.cancel(false, p.err)
+		} else {
+			if p.children == nil {
+				p.children = make(map[canceler]struct{})
+			}
+			p.children[child] = struct{}{}
+		}
+		p.mu.Unlock()
+	} else {
+		atomic.AddInt32(&goroutines, +1)
+		go func() {
+			select {
+			case <-parent.Done():
+				child.cancel(false, parent.Err())
+			case <-child.Done():
+			}
+		}()
+	}
+}
+
+//cancel方法会关闭自身的通道，并且遍历当前children哈希表，调用当前所有子context的退出函数
+func (c *timerCtx) cancel(removeFromParent bool, err error) {
+	c.cancelCtx.cancel(false, err)
+	if removeFromParent {
+		// Remove this timerCtx from its parent cancelCtx's children.
+		removeChild(c.cancelCtx.Context, c)
+	}
+	c.mu.Lock()
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+	c.mu.Unlock()
+}
+```
+
+### 数据争用检查
+
+数据争用在Go语言中指两个协程同时访问相同的内存空间，并且至少有一个写操作的情况。
+
+#### race工具
+
+race可以使用在多个Go指令当中，当检测器在程序中找到数据争用时，将打印报告。该报告包含发生race冲突的协程栈，以及此时正在运行的协程栈。
+
+#### race原理
+
+race工具借助了google为了应对内部大量服务器端C++代码的数据争用问题而开发的ThreadSanitizer工具，Go语言内部通过CGO的形式进行调用。
+
+矢量时钟技术（vector clock）用来观察事件之间happened-before的顺序，用于检测和确定分布式系统中的事件的因果关系，也可以用于数据争用的探测。在Go程序中，有n个协程就会有对应的n个逻辑时钟，而矢量时钟是所有这些逻辑时钟组成的数组。
+
+在Go语言中，每个协程在创建之初都会初始化矢量时钟，并且在读取或者写入事件时修改自身的逻辑时钟。
+
+触发race事件主要有两种方式，一是在Go语言运行时中大量（超过100处）注入触发事件。二是依靠编译器加上race指令。
+
+### 锁
+
+#### 原子锁
+
+针对基本数据类型我们还可以使用原子操作来保证并发安全，因为原子操作是Go语言提供的方法它在用户态就可以完成，因此性能比加锁操作更好。Go语言中原子操作由内置的标准库`sync/atomic`提供。
+
+| 方法                                                         | 解释           |
+| ------------------------------------------------------------ | -------------- |
+| func LoadInt32(addr `*int32`) (val int32)<br/>func LoadInt64(addr `*int64`) (val int64)<br/>func LoadUint32(addr`*uint32`) (val uint32)<br/>func LoadUint64(addr`*uint64`) (val uint64)<br/>func LoadUintptr(addr`*uintptr`) (val uintptr)<br/>func LoadPointer(addr`*unsafe.Pointer`) (val unsafe.Pointer) | 读取操作       |
+| func StoreInt32(addr `*int32`, val int32)<br/>func StoreInt64(addr `*int64`, val int64)<br/>func StoreUint32(addr `*uint32`, val uint32)<br/>func StoreUint64(addr `*uint64`, val uint64)<br/>func StoreUintptr(addr `*uintptr`, val uintptr)<br/>func StorePointer(addr `*unsafe.Pointer`, val unsafe.Pointer) | 写入操作       |
+| func AddInt32(addr `*int32`, delta int32) (new int32)<br/>func AddInt64(addr `*int64`, delta int64) (new int64)<br/>func AddUint32(addr `*uint32`, delta uint32) (new uint32)<br/>func AddUint64(addr `*uint64`, delta uint64) (new uint64)<br/>func AddUintptr(addr `*uintptr`, delta uintptr) (new uintptr) | 修改操作       |
+| func SwapInt32(addr `*int32`, new int32) (old int32)<br/>func SwapInt64(addr `*int64`, new int64) (old int64)<br/>func SwapUint32(addr `*uint32`, new uint32) (old uint32)<br/>func SwapUint64(addr `*uint64`, new uint64) (old uint64)<br/>func SwapUintptr(addr `*uintptr`, new uintptr) (old uintptr)<br/>func SwapPointer(addr `*unsafe.Pointer`, new unsafe.Pointer) (old unsafe.Pointer) | 交换操作       |
+| func CompareAndSwapInt32(addr `*int32`, old, new int32) (swapped bool)<br/>func CompareAndSwapInt64(addr `*int64`, old, new int64) (swapped bool)<br/>func CompareAndSwapUint32(addr `*uint32`, old, new uint32) (swapped bool)<br/>func CompareAndSwapUint64(addr `*uint64`, old, new uint64) (swapped bool)<br/>func CompareAndSwapUintptr(addr `*uintptr`, old, new uintptr) (swapped bool)<br/>func CompareAndSwapPointer(addr `*unsafe.Pointer`, old, new unsafe.Pointer) (swapped bool) | 比较并交换操作 |
+
+原子锁是底层最基础的同步保证，通过原子操作可以构建起许多同步原语，例如自旋锁、信号量、互斥锁等。
+
+#### 互斥锁
+
+sync.Mutex构建起了互斥锁。互斥锁是一种混合锁，其实现方式包含了自旋锁，同时参考了操作系统锁的实现。Mutex包含了锁的状态state及信号量sema。
+
+```go
+// A Mutex is a mutual exclusion lock.
+// The zero value for a Mutex is an unlocked mutex.
+//
+// A Mutex must not be copied after first use.
+type Mutex struct {
+	state int32 
+	sema  uint32
+}
+```
+
+state通过位图的形式存储了当前锁的状态，包含了锁是否为锁定状态、正在等待被锁唤醒的协程数量、两个和饥饿模式有关的标志。为了解决某一个协程可能长时间无法获取锁的问题，Go采用了饥饿模式，在饥饿模式下，unlock会唤醒最先申请的协程。sema是互斥锁中实现的信号量。
+
+##### 加锁
+
+互斥锁的第1个阶段是使用原子操作快速抢占锁。
+
+```go
+// Lock locks m.
+// If the lock is already in use, the calling goroutine
+// blocks until the mutex is available.
+func (m *Mutex) Lock() {
+	// Fast path: grab unlocked mutex.
+	if atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {
+		if race.Enabled {
+			race.Acquire(unsafe.Pointer(m))
+		}
+		return
+	}
+	// Slow path (outlined so that the fast path can be inlined)
+	m.lockSlow()
+}
+```
+
+lockSlow方法在正常情况下回自旋尝试抢占锁一段时间，而不会立即进入休眠状态。runtime_canSpin函数会判断当前是否能进入自旋状态。
+在以下四种情况，自旋状态会立即终止：
+
+* 程序在单核CPU上运行
+
+* 逻辑处理器P小于等于1
+
+* 当前协程所在的逻辑处理器P的本地队列上有其他协程待运行
+
+* 自旋次数超过设定的阈值
+
+当长时间没有获取到锁，就进入互斥锁的第2个阶段，使用信号量进行同步。如果加锁操作进入信号量同步阶段，信号量计数减1，解锁操作则加1。当信号量计数值大于0时，意味着有其他协程执行了解锁操作，这时加锁协程可以直接退出。当信号量计数值等于0时，意味着当前加锁协程需要陷入休眠状态。
+
+```go
+func (m *Mutex) lockSlow() {
+	var waitStartTime int64
+	starving := false
+	awoke := false
+	iter := 0
+	old := m.state
+	for {
+		// Don't spin in starvation mode, ownership is handed off to waiters
+		// so we won't be able to acquire the mutex anyway.
+		if old&(mutexLocked|mutexStarving) == mutexLocked && runtime_canSpin(iter) {
+			// Active spinning makes sense.
+			// Try to set mutexWoken flag to inform Unlock
+			// to not wake other blocked goroutines.
+			if !awoke && old&mutexWoken == 0 && old>>mutexWaiterShift != 0 &&
+				atomic.CompareAndSwapInt32(&m.state, old, old|mutexWoken) {
+				awoke = true
+			}
+			runtime_doSpin()
+			iter++
+			old = m.state
+			continue
+		}
+		new := old
+		// Don't try to acquire starving mutex, new arriving goroutines must queue.
+		if old&mutexStarving == 0 {
+			new |= mutexLocked
+		}
+		if old&(mutexLocked|mutexStarving) != 0 {
+			new += 1 << mutexWaiterShift
+		}
+		// The current goroutine switches mutex to starvation mode.
+		// But if the mutex is currently unlocked, don't do the switch.
+		// Unlock expects that starving mutex has waiters, which will not
+		// be true in this case.
+		if starving && old&mutexLocked != 0 {
+			new |= mutexStarving
+		}
+		if awoke {
+			// The goroutine has been woken from sleep,
+			// so we need to reset the flag in either case.
+			if new&mutexWoken == 0 {
+				throw("sync: inconsistent mutex state")
+			}
+			new &^= mutexWoken
+		}
+		if atomic.CompareAndSwapInt32(&m.state, old, new) {
+			if old&(mutexLocked|mutexStarving) == 0 {
+				break // locked the mutex with CAS
+			}
+			// If we were already waiting before, queue at the front of the queue.
+			queueLifo := waitStartTime != 0
+			if waitStartTime == 0 {
+				waitStartTime = runtime_nanotime()
+			}
+			runtime_SemacquireMutex(&m.sema, queueLifo, 1)
+			starving = starving || runtime_nanotime()-waitStartTime > starvationThresholdNs
+			old = m.state
+			if old&mutexStarving != 0 {
+				// If this goroutine was woken and mutex is in starvation mode,
+				// ownership was handed off to us but mutex is in somewhat
+				// inconsistent state: mutexLocked is not set and we are still
+				// accounted as waiter. Fix that.
+				if old&(mutexLocked|mutexWoken) != 0 || old>>mutexWaiterShift == 0 {
+					throw("sync: inconsistent mutex state")
+				}
+				delta := int32(mutexLocked - 1<<mutexWaiterShift)
+				if !starving || old>>mutexWaiterShift == 1 {
+					// Exit starvation mode.
+					// Critical to do it here and consider wait time.
+					// Starvation mode is so inefficient, that two goroutines
+					// can go lock-step infinitely once they switch mutex
+					// to starvation mode.
+					delta -= mutexStarving
+				}
+				atomic.AddInt32(&m.state, delta)
+				break
+			}
+			awoke = true
+			iter = 0
+		} else {
+			old = m.state
+		}
+	}
+
+	if race.Enabled {
+		race.Acquire(unsafe.Pointer(m))
+	}
+}
+```
+
+互斥锁的第3个阶段，所有锁的信息都会根据锁的地址存储在全局semtable哈希表中。锁被放到全局的等待队列中并等待被唤醒，顺序为从前到后，遵循先入先出的准则，这样保证了公平性。当长时间无法获取锁时，当前的互斥锁会进入饥饿模式。在饥饿模式下，为了保证公平性，新申请锁的协程不会进入自旋状态，而是直接放入等待队列中。放入等待队列中的协程会切换自己的执行状态，让渡执行权力并进行新的调度循环。
+
+##### 解锁
+
+互斥锁的释放和锁定相对应。
+
+如果当前锁处于普通的锁定状态，Unlock方法在修改mutexLocked状态后立即退出。
+
+```go
+// Unlock unlocks m.
+// It is a run-time error if m is not locked on entry to Unlock.
+//
+// A locked Mutex is not associated with a particular goroutine.
+// It is allowed for one goroutine to lock a Mutex and then
+// arrange for another goroutine to unlock it.
+func (m *Mutex) Unlock() {
+	if race.Enabled {
+		_ = m.state
+		race.Release(unsafe.Pointer(m))
+	}
+
+	// Fast path: drop lock bit.
+	new := atomic.AddInt32(&m.state, -mutexLocked)
+	if new != 0 {
+		// Outlined slow path to allow inlining the fast path.
+		// To hide unlockSlow during tracing we skip one extra frame when tracing GoUnblock.
+		m.unlockSlow(new)
+	}
+}
+```
+判断锁是否重复释放。锁不能重复释放，否则会在运行时报错。
+
+```go
+if (new+mutexLocked)&mutexLocked == 0 {
+		throw("sync: unlock of unlocked mutex")
+	}
+```
+
+如果锁处于饥饿状态，则进入信号量同步阶段，到全局哈希表中寻找当前锁的等待队列，以先进先出的顺序唤醒指定协程。
+
+如果锁当前未处于饥饿状态且当前mutexWoken已设置，则表明有其他申请锁的协程准备从正常状态退出，这时锁释放后不用去当前锁的等待队列唤醒其他协程，而是直接退出。如果唤醒了等待队列中的协程，则将唤醒的协程放入当前协程所在逻辑处理器P的runnext字段中，存储runnext字段中的协程会被优先调度。如果在饥饿模式下，则当前协程会让渡自己的执行权利，让被唤醒的协程直接运行，这是通过将`runtime_Semrelease`函数的第2个参数设置为true实现的。
+
+```go
+func (m *Mutex) unlockSlow(new int32) {
+	if (new+mutexLocked)&mutexLocked == 0 {
+		throw("sync: unlock of unlocked mutex")
+	}
+	if new&mutexStarving == 0 {
+		old := new
+		for {
+			// If there are no waiters or a goroutine has already
+			// been woken or grabbed the lock, no need to wake anyone.
+			// In starvation mode ownership is directly handed off from unlocking
+			// goroutine to the next waiter. We are not part of this chain,
+			// since we did not observe mutexStarving when we unlocked the mutex above.
+			// So get off the way.
+            //当前没有等待被唤醒的协程或者mutexWoken已设置
+			if old>>mutexWaiterShift == 0 || old&(mutexLocked|mutexWoken|mutexStarving) != 0 {
+				return
+			}
+			// Grab the right to wake someone.
+            //唤醒等待中的协程
+			new = (old - 1<<mutexWaiterShift) | mutexWoken
+			if atomic.CompareAndSwapInt32(&m.state, old, new) {
+				runtime_Semrelease(&m.sema, false, 1)
+				return
+			}
+			old = m.state
+		}
+	} else {
+		// Starving mode: handoff mutex ownership to the next waiter, and yield
+		// our time slice so that the next waiter can start to run immediately.
+		// Note: mutexLocked is not set, the waiter will set it after wakeup.
+		// But mutex is still considered locked if mutexStarving is set,
+		// so new coming goroutines won't acquire it.
+        //在饥饿模式下唤醒协程，并立即执行
+		runtime_Semrelease(&m.sema, true, 1)
+	}
+}
+```
+
+#### 读写锁
+
+读写锁适用于多读少写的场景。通过两种锁来实现：一种为读锁，一种为写锁。当进行读取操作时，需要加读锁，而进行写入操作时，需要加写锁。多个协程可以同时获取读锁并执行。如果此时有协程申请了写锁，那么该写锁会等待所有读锁被释放后才能获取写锁继续执行。如果当前协程申请读锁时已经存在写锁，那么读锁会等待写锁释放后在获取读锁继续执行。
+
+读锁必须能观察到上一次写锁写入的值，写锁要等待之前的读锁释放才能写入。读可以有多个协程同时读，但是写只能有一个协程同时写。
+
+##### 读写锁原理
+
+```go
+// There is a modified copy of this file in runtime/rwmutex.go.
+// If you make any changes here, see if you should make them there.
+
+// A RWMutex is a reader/writer mutual exclusion lock.
+// The lock can be held by an arbitrary number of readers or a single writer.
+// The zero value for a RWMutex is an unlocked mutex.
+//
+// A RWMutex must not be copied after first use.
+//
+// If a goroutine holds a RWMutex for reading and another goroutine might
+// call Lock, no goroutine should expect to be able to acquire a read lock
+// until the initial read lock is released. In particular, this prohibits
+// recursive read locking. This is to ensure that the lock eventually becomes
+// available; a blocked Lock call excludes new readers from acquiring the
+// lock.
+type RWMutex struct {
+	w           Mutex  // held if there are pending writers
+	writerSem   uint32 // semaphore for writers to wait for completing readers
+	readerSem   uint32 // semaphore for readers to wait for completing writers
+	readerCount int32  // number of pending readers
+	readerWait  int32  // number of departing readers
+}
+```
+
+* 读锁
+
+  读取操作先通过院子操作将readerCount加1，如果readerCount≥0就直接返回，所以如果只是获取读取锁的操作，那么其成本只有一个原子操作。如果readerCount＜0，说明当前有写锁，当前协程将借助信号量陷入等待状态，如果获取到信号量则立即退出，没有获取到信号量时的逻辑与互斥锁逻辑类似。
+
+  ```go
+  // Happens-before relationships are indicated to the race detector via:
+  // - Unlock  -> Lock:  readerSem
+  // - Unlock  -> RLock: readerSem
+  // - RUnlock -> Lock:  writerSem
+  //
+  // The methods below temporarily disable handling of race synchronization
+  // events in order to provide the more precise model above to the race
+  // detector.
+  //
+  // For example, atomic.AddInt32 in RLock should not appear to provide
+  // acquire-release semantics, which would incorrectly synchronize racing
+  // readers, thus potentially missing races.
+  
+  // RLock locks rw for reading.
+  //
+  // It should not be used for recursive read locking; a blocked Lock
+  // call excludes new readers from acquiring the lock. See the
+  // documentation on the RWMutex type.
+  func (rw *RWMutex) RLock() {
+  	if race.Enabled {
+  		_ = rw.w.state
+  		race.Disable()
+  	}
+  	if atomic.AddInt32(&rw.readerCount, 1) < 0 {
+  		// A writer is pending, wait for it.
+  		runtime_SemacquireMutex(&rw.readerSem, false, 0)
+  	}
+  	if race.Enabled {
+  		race.Enable()
+  		race.Acquire(unsafe.Pointer(&rw.readerSem))
+  	}
+  }
+  ```
+
+  读锁解锁时，如果当前没有写锁，则其成本只有一个原子操作并直接退出。
+
+  ```go
+  // RUnlock undoes a single RLock call;
+  // it does not affect other simultaneous readers.
+  // It is a run-time error if rw is not locked for reading
+  // on entry to RUnlock.
+  func (rw *RWMutex) RUnlock() {
+  	if race.Enabled {
+  		_ = rw.w.state
+  		race.ReleaseMerge(unsafe.Pointer(&rw.writerSem))
+  		race.Disable()
+  	}
+  	if r := atomic.AddInt32(&rw.readerCount, -1); r < 0 {
+  		// Outlined slow-path to allow the fast-path to be inlined
+  		rw.rUnlockSlow(r)
+  	}
+  	if race.Enabled {
+  		race.Enable()
+  	}
+  }
+  ```
+
+  如果当前有写锁在等待，则调用rUnlockSlow判断当前是否最后一个被释放的读锁，如果是则需要增加信号量并唤醒写锁。
+
+  ```go
+  func (rw *RWMutex) rUnlockSlow(r int32) {
+  	if r+1 == 0 || r+1 == -rwmutexMaxReaders {
+  		race.Enable()
+  		throw("sync: RUnlock of unlocked RWMutex")
+  	}
+  	// A writer is pending.
+  	if atomic.AddInt32(&rw.readerWait, -1) == 0 {
+  		// The last reader unblocks the writer.
+  		runtime_Semrelease(&rw.writerSem, false, 1)
+  	}
+  }
+  ```
+
+* 写锁
+
+  读写锁申请写锁时要调用Lock方法，必须先获取互斥锁，因为它复用了互斥锁的功能。接着readerCount减去rwmutexMaxReaders阻止后续的读操作。如果当前有其他的G持有互斥锁的读锁，那么当前协程会加入全局等待队列并进入休眠状态，当最后一个读锁被释放时，会唤醒该协程。
+
+  ```go
+  // Lock locks rw for writing.
+  // If the lock is already locked for reading or writing,
+  // Lock blocks until the lock is available.
+  func (rw *RWMutex) Lock() {
+  	if race.Enabled {
+  		_ = rw.w.state
+  		race.Disable()
+  	}
+  	// First, resolve competition with other writers.
+  	rw.w.Lock()
+  	// Announce to readers there is a pending writer.
+  	r := atomic.AddInt32(&rw.readerCount, -rwmutexMaxReaders) + rwmutexMaxReaders
+  	// Wait for active readers.
+  	if r != 0 && atomic.AddInt32(&rw.readerWait, r) != 0 {
+  		runtime_SemacquireMutex(&rw.writerSem, false, 0)
+  	}
+  	if race.Enabled {
+  		race.Enable()
+  		race.Acquire(unsafe.Pointer(&rw.readerSem))
+  		race.Acquire(unsafe.Pointer(&rw.writerSem))
+  	}
+  }
+  ```
+
+  解锁时，调用Unlock方法。将readerCount加上rwmutexMaxReaders，表示不会堵塞后续的读锁，依次唤醒所有等待中的读锁。当所有读锁唤醒完毕后会释放互斥锁。
+
+  ```go
+  // Unlock unlocks rw for writing. It is a run-time error if rw is
+  // not locked for writing on entry to Unlock.
+  //
+  // As with Mutexes, a locked RWMutex is not associated with a particular
+  // goroutine. One goroutine may RLock (Lock) a RWMutex and then
+  // arrange for another goroutine to RUnlock (Unlock) it.
+  func (rw *RWMutex) Unlock() {
+  	if race.Enabled {
+  		_ = rw.w.state
+  		race.Release(unsafe.Pointer(&rw.readerSem))
+  		race.Disable()
+  	}
+  
+  	// Announce to readers there is no active writer.
+  	r := atomic.AddInt32(&rw.readerCount, rwmutexMaxReaders)
+  	if r >= rwmutexMaxReaders {
+  		race.Enable()
+  		throw("sync: Unlock of unlocked RWMutex")
+  	}
+  	// Unblock blocked readers, if any.
+  	for i := 0; i < int(r); i++ {
+  		runtime_Semrelease(&rw.readerSem, false, 0)
+  	}
+  	// Allow other writers to proceed.
+  	rw.w.Unlock()
+  	if race.Enabled {
+  		race.Enable()
+  	}
+  }
+  ```
+
+  所以读写锁在写操作时的性能和互斥锁类似，但是在只有读操作时效率会高很多，因为读锁可以被多个协程获取。
 
 ## 18. 内存分配管理
 
+合理安排、组织、管理、释放内存是高效程序的基础。Go语言运行时依靠细微的对象切割、极致的多级缓存、精准的位图管理实现了对内存的精细化管理。
+
+### GO内存分配
+
+#### span和元素
+
+Go语言将内存分成了大大小小67个级别的span，其中0代表特殊的大对象，其个数是不确定的。当具体的对象需要分配内存时，并不是直接分配span，而是分配不同级别的span中的元素。span的级别不是以每个span的大小为依据的，而是以span中的元素大小为依据。
+
+| span等级 | 元素大小（字节） | span大小（字节） | 元素个数 |
+| :------- | ---------------- | ---------------- | -------- |
+| 1        | 8                | 8192             | 1024     |
+| 2        | 16               | 8192             | 512      |
+| 3        | 32               | 8192             | 256      |
+| 4        | 48               | 8192             | 170      |
+| 5        | 64               | 8192             | 128      |
+| ...      | ...              | ...              | ...      |
+| 65       | 28678            | 57344            | 2        |
+| 66       | 32768            | 32768            | 1        |
+
+#### 三级对象管理
+
+为了方便对span进行管理，加速span对象的访问和分配，Go语言采取了三级对象管理结构，分别为mcache、mcentral、mheap。
+
+Go语言采用了现代TCMalloc内存分配算法的思想，每个逻辑处理器P都存储了一个本地span缓存，成为mcache。如果协程需要内存可以直接从mcache中获取，由于同一时间只有一个协程运行在逻辑处理器P上，所以中间不需要加锁。mcache包含所有大小规格的mspan，但每种规格大小只包含一个。出了class0外，mcache的span都来自于mcentral。
+
+* mcentral是被所有逻辑处理器P共享的。
+
+* mcentral对象收集所有给定规格大小的span。每个mcentral都包含两个mspan的链表：empty msapnList表示没有空闲对象或span已经被mcache缓存的span链表，nonempty mspanList表示有空闲对象的span链表。
+
+做这种区分是为了更快的分配span到mcache中。除了级别0，每个级别的span都会有一个mcentral用于管理span链表。而所有级别的这些mcentral其实都是一个数组，由mheap进行管理。
+
+mheap的作用不只是管理central，大对象也会直接通过mheap进行分配。mheap实现了对虚拟内存线性地址空间的精准管理，建立了span与具体线性地址空间的联系，保存了分配的位图信息，是管理内存的最核心单元。
+
+#### 四级对象内存块管理
+
+根据对象的大小，Go语言将堆内存分成了HeapArea、chunk、span和page4种内存块进行管理。HeapArea内存块最大，其大小和平台相关，在Unix64位操作系统中占据64MB。chunk占据了512KB，span根据级别大小的不同而不同，但必须是page的倍数。1个page占据8KB。不同的内存块用于不同的场景，便于高效地对内存进行管理。
+
+### 对象分配
+
+不同大小的对象会被分配到不同的span中。运行时分配对象的逻辑主要位于mallocgc函数，此函数除了分配内存还会为垃圾回收做一些位图标记工作。
+
+```go
+// Allocate an object of size bytes.
+// Small objects are allocated from the per-P cache's free lists.
+// Large objects (> 32 kB) are allocated straight from the heap.
+func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
+    ...
+    // In some cases block zeroing can profitably (for latency reduction purposes)
+	// be delayed till preemption is possible; isZeroed tracks that state.
+	isZeroed := true
+    //判断是否为小对象，maxSmallSize当前为32KB
+	if size <= maxSmallSize {
+		if noscan && size < maxTinySize {
+            //微小对象分配
+			// Tiny allocator.
+			//
+			// Tiny allocator combines several tiny allocation requests
+			// into a single memory block. The resulting memory block
+			// is freed when all subobjects are unreachable. The subobjects
+			// must be noscan (don't have pointers), this ensures that
+			// the amount of potentially wasted memory is bounded.
+			//
+			// Size of the memory block used for combining (maxTinySize) is tunable.
+			// Current setting is 16 bytes, which relates to 2x worst case memory
+			// wastage (when all but one subobjects are unreachable).
+			// 8 bytes would result in no wastage at all, but provides less
+			// opportunities for combining.
+			// 32 bytes provides more opportunities for combining,
+			// but can lead to 4x worst case wastage.
+			// The best case winning is 8x regardless of block size.
+			//
+			// Objects obtained from tiny allocator must not be freed explicitly.
+			// So when an object will be freed explicitly, we ensure that
+			// its size >= maxTinySize.
+			//
+			// SetFinalizer has a special case for objects potentially coming
+			// from tiny allocator, it such case it allows to set finalizers
+			// for an inner byte of a memory block.
+			//
+			// The main targets of tiny allocator are small strings and
+			// standalone escaping variables. On a json benchmark
+			// the allocator reduces number of allocations by ~12% and
+			// reduces heap size by ~20%.
+			off := c.tinyoffset
+			// Align tiny pointer for required (conservative) alignment.
+			if size&7 == 0 {
+				off = alignUp(off, 8)
+			} else if sys.PtrSize == 4 && size == 12 {
+				// Conservatively align 12-byte objects to 8 bytes on 32-bit
+				// systems so that objects whose first field is a 64-bit
+				// value is aligned to 8 bytes and does not cause a fault on
+				// atomic access. See issue 37262.
+				// TODO(mknyszek): Remove this workaround if/when issue 36606
+				// is resolved.
+				off = alignUp(off, 8)
+			} else if size&3 == 0 {
+				off = alignUp(off, 4)
+			} else if size&1 == 0 {
+				off = alignUp(off, 2)
+			}
+			if off+size <= maxTinySize && c.tiny != 0 {
+				// The object fits into existing tiny block.
+				x = unsafe.Pointer(c.tiny + off)
+				c.tinyoffset = off + size
+				c.tinyAllocs++
+				mp.mallocing = 0
+				releasem(mp)
+				return x
+			}
+			// Allocate a new maxTinySize block.
+			span = c.alloc[tinySpanClass]
+			v := nextFreeFast(span)
+			if v == 0 {
+				v, span, shouldhelpgc = c.nextFree(tinySpanClass)
+			}
+			x = unsafe.Pointer(v)
+			(*[2]uint64)(x)[0] = 0
+			(*[2]uint64)(x)[1] = 0
+			// See if we need to replace the existing tiny block with the new one
+			// based on amount of remaining free space.
+			if !raceenabled && (size < c.tinyoffset || c.tiny == 0) {
+				// Note: disabled when race detector is on, see comment near end of this function.
+				c.tiny = uintptr(x)
+				c.tinyoffset = size
+			}
+			size = maxTinySize
+		} else {
+            //小对象分配
+			var sizeclass uint8
+			if size <= smallSizeMax-8 {
+				sizeclass = size_to_class8[divRoundUp(size, smallSizeDiv)]
+			} else {
+				sizeclass = size_to_class128[divRoundUp(size-smallSizeMax, largeSizeDiv)]
+			}
+			size = uintptr(class_to_size[sizeclass])
+			spc := makeSpanClass(sizeclass, noscan)
+			span = c.alloc[spc]
+			v := nextFreeFast(span)
+			if v == 0 {
+				v, span, shouldhelpgc = c.nextFree(spc)
+			}
+			x = unsafe.Pointer(v)
+			if needzero && span.needzero != 0 {
+				memclrNoHeapPointers(unsafe.Pointer(v), size)
+			}
+		}
+	} else {
+        //大对象分配
+		shouldhelpgc = true
+		// For large allocations, keep track of zeroed state so that
+		// bulk zeroing can be happen later in a preemptible context.
+		span, isZeroed = c.allocLarge(size, needzero && !noscan, noscan)
+		span.freeindex = 1
+		span.allocCount = 1
+		x = unsafe.Pointer(span.base())
+		size = span.elemsize
+	}
+	...
+
+	return x
+}
+```
+
+##### 微小对象
+
+小于16字节的对象被划分为微小对象。划分微小对象的主要目的是处理绩效的字符串和独立的转义变量。
+
+微小对象会被放入class为2的span中。首先对微小对象按照2、4、8的规则进行字节对齐。例如：字节为1的元素会被分配2字节，字节为7的元素会被分配8字节。
+
+```go
+			// Align tiny pointer for required (conservative) alignment.
+			if size&7 == 0 {
+				off = alignUp(off, 8)
+			} else if sys.PtrSize == 4 && size == 12 {
+				// Conservatively align 12-byte objects to 8 bytes on 32-bit
+				// systems so that objects whose first field is a 64-bit
+				// value is aligned to 8 bytes and does not cause a fault on
+				// atomic access. See issue 37262.
+				// TODO(mknyszek): Remove this workaround if/when issue 36606
+				// is resolved.
+				off = alignUp(off, 8)
+			} else if size&3 == 0 {
+				off = alignUp(off, 4)
+			} else if size&1 == 0 {
+				off = alignUp(off, 2)
+			}
+```
+
+查看之前分配的元素中是否有空余的空间，如果可以满足，则返回tiny+offset的地址，意味着当前地址往后的字节都是可以被分配的。分配完成后的offset位置也需要相应增加，为下一次分配做准备。如果当前要分配的元素空间不够，将尝试从mcache中查找span中下一个可用的元素。因此，tiny分配的第一步是尝试利用分配过的前一个元素的空间，达到节约内存的目的。
+
+```go
+			if off+size <= maxTinySize && c.tiny != 0 {
+				// The object fits into existing tiny block.
+				x = unsafe.Pointer(c.tiny + off)
+				c.tinyoffset = off + size
+				c.tinyAllocs++
+				mp.mallocing = 0
+				releasem(mp)
+				return x
+			}
+			// Allocate a new maxTinySize block.
+			span = c.alloc[tinySpanClass]
+			v := nextFreeFast(span)
+			if v == 0 {
+				v, span, shouldhelpgc = c.nextFree(tinySpanClass)
+			}
+			x = unsafe.Pointer(v)
+			(*[2]uint64)(x)[0] = 0
+			(*[2]uint64)(x)[1] = 0
+			// See if we need to replace the existing tiny block with the new one
+			// based on amount of remaining free space.
+			if !raceenabled && (size < c.tinyoffset || c.tiny == 0) {
+				// Note: disabled when race detector is on, see comment near end of this function.
+				c.tiny = uintptr(x)
+				c.tinyoffset = size
+			}
+			size = maxTinySize
+```
+
+###### mcache缓存位图
+
+在查找空闲元素空间时，首先要从mcache中照出对应级别的mspan，mspan当中拥有allocCache字段，其作为一个位图，用于标记span中的元素是否被分配。由于allocCache元素为uint64，因此其最多一次缓存64个元素。
+
+```go
+// nextFreeFast returns the next free object if one is quickly available.
+// Otherwise it returns 0.
+func nextFreeFast(s *mspan) gclinkptr {
+	theBit := sys.Ctz64(s.allocCache) // Is there a free object in the allocCache?
+	if theBit < 64 {
+		result := s.freeindex + uintptr(theBit)
+		if result < s.nelems {
+			freeidx := result + 1
+			if freeidx%64 == 0 && freeidx != s.nelems {
+				return 0
+			}
+			s.allocCache >>= uint(theBit + 1)
+			s.freeindex = freeidx
+			s.allocCount++
+			return gclinkptr(result*s.elemsize + s.base())
+		}
+	}
+	return 0
+}
+
+// Ctz64 counts trailing (low-order) zeroes,
+// and if all are zero, then 64.
+func Ctz64(x uint64) int {
+	x &= -x                       // isolate low-order bit
+	y := x * deBruijn64ctz >> 58  // extract part of deBruijn sequence
+	i := int(deBruijnIdx64ctz[y]) // convert to bit index
+	z := int((x - 1) >> 57 & 64)  // adjustment if zero
+	return i + z
+}
+```
+
+allocCache中的最后1bit对应的是span中的第1个元素是否被分配。当bit位为0代表当前对应的span中的元素已经分配，这里的设计是为了sys.Ctz64函数加速计算。因此sys.Ctz64可以直接计算 allocCache 最后面有几个 0 (也就是在第几个 bit 遇到第一个 1) 来使用。
+
+![image-20220915150312719](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202209151503792.png)
+
+有时候，span中元素的个数大于64，因此需要专门有一个字段freeindex标识当前span元素被分配到了哪里。因此，只要从allocCache开始找到哪一位为1即可。假如X位为1，那么X+freeindex为当前span中可用的元素序号。当allocCache中的bit位全部被标记为0后，需要移动freeindex，并更新allocCache，直到span中的元素的末尾为止。
+
+###### mcentral遍历span
+
+如果当前的span中没有可以使用的元素，那么需要从mcentral中加锁查找。在mcentral查找时，会分别遍历mcentral的empty 链表和nonempty 链表两种类型span链表。之所以遍历empty msapnList是因为可能有些span虽然被垃圾回收器标记为空闲了，但是还没来得及清理，这些span在清扫后仍然是可以使用的。
+
+```go
+// Allocate a span to use in an mcache.
+func (c *mcentral) cacheSpan() *mspan {
+	...
+
+	var s *mspan
+	sl := newSweepLocker()
+	sg := sl.sweepGen
+
+	// Try partial swept spans first.
+	if s = c.partialSwept(sg).pop(); s != nil {
+		goto havespan
+	}
+
+	// Now try partial unswept spans.
+	for ; spanBudget >= 0; spanBudget-- {
+		s = c.partialUnswept(sg).pop()
+		if s == nil {
+			break
+		}
+		if s, ok := sl.tryAcquire(s); ok {
+			// We got ownership of the span, so let's sweep it and use it.
+			s.sweep(true)
+			sl.dispose()
+			goto havespan
+		}
+		// We failed to get ownership of the span, which means it's being or
+		// has been swept by an asynchronous sweeper that just couldn't remove it
+		// from the unswept list. That sweeper took ownership of the span and
+		// responsibility for either freeing it to the heap or putting it on the
+		// right swept list. Either way, we should just ignore it (and it's unsafe
+		// for us to do anything else).
+	}
+	// Now try full unswept spans, sweeping them and putting them into the
+	// right list if we fail to get a span.
+	for ; spanBudget >= 0; spanBudget-- {
+		s = c.fullUnswept(sg).pop()
+		if s == nil {
+			break
+		}
+		if s, ok := sl.tryAcquire(s); ok {
+			// We got ownership of the span, so let's sweep it.
+			s.sweep(true)
+			// Check if there's any free space.
+			freeIndex := s.nextFreeIndex()
+			if freeIndex != s.nelems {
+				s.freeindex = freeIndex
+				sl.dispose()
+				goto havespan
+			}
+			// Add it to the swept list, because sweeping didn't give us any free space.
+			c.fullSwept(sg).push(s.mspan)
+		}
+		// See comment for partial unswept spans.
+	}
+    ...
+	return s
+}
+```
+
+ ###### mheap缓存查找
+
+如果在mcentral中找不到可以使用的span，就需要在mheap中查找。
+
+Go1.14之后，每个逻辑处理器P中都维护了一份pageCache。
+
+```go
+// pageCache represents a per-p cache of pages the allocator can
+// allocate from without a lock. More specifically, it represents
+// a pageCachePages*pageSize chunk of memory with 0 or more free
+// pages in it.
+type pageCache struct {
+	base  uintptr // base address of the chunk
+	cache uint64  // 64-bit bitmap representing free pages (1 means free)
+	scav  uint64  // 64-bit bitmap representing scavenged pages (1 means scavenged)
+}
+```
+
+mheap会首先查找每个逻辑处理器P中的pageCache字段的cache。cache也是一个位图，每一位都代表了一个page（8KB）。由于cache为uint64，因此一共可以提供512KB的连续虚拟内存。在cache中，1代表未分配的内存，0代表已分配的内存。base代表该虚拟内存的基地址。当需要分配的内存小于512/4=128KB时，需要首先从cache中分配。例如：要分配n pages，就需要查找cache中是否有连续n个为1的位。如果存在，说明在缓存中查找到了合适的内存，用于构建span。
+
+###### mheap基数树查找
+
+如果要分配的page过大或者在逻辑处理器P的cache没有找到可以用的page，就需要对mheap加锁，并在整个mheap管理的虚拟地址空间的位图中查找是否有可用的page。管理线性地址空间的位图结构叫做基数树。
+
+该树中的每个节点都对应一个pallocSum，最底层的叶子节点对应的pallocSum包含一个chunk的信息（512*8KB），除叶子节点外的节点都包含连续8个子节点的内存信息。因此越往上的节点对应的内存越多。
+
+```go
+// pallocSum is a packed summary type which packs three numbers: start, max,
+// and end into a single 8-byte value. Each of these values are a summary of
+// a bitmap and are thus counts, each of which may have a maximum value of
+// 2^21 - 1, or all three may be equal to 2^21. The latter case is represented
+// by just setting the 64th bit.
+type pallocSum uint64
+
+// start extracts the start value from a packed sum.
+func (p pallocSum) start() uint {
+	if uint64(p)&uint64(1<<63) != 0 {
+		return maxPackedValue
+	}
+	return uint(uint64(p) & (maxPackedValue - 1))
+}
+
+// max extracts the max value from a packed sum.
+func (p pallocSum) max() uint {
+	if uint64(p)&uint64(1<<63) != 0 {
+		return maxPackedValue
+	}
+	return uint((uint64(p) >> logMaxPackedValue) & (maxPackedValue - 1))
+}
+
+// end extracts the end value from a packed sum.
+func (p pallocSum) end() uint {
+	if uint64(p)&uint64(1<<63) != 0 {
+		return maxPackedValue
+	}
+	return uint((uint64(p) >> (2 * logMaxPackedValue)) & (maxPackedValue - 1))
+}
+
+// unpack unpacks all three values from the summary.
+func (p pallocSum) unpack() (uint, uint, uint) {
+	if uint64(p)&uint64(1<<63) != 0 {
+		return maxPackedValue, maxPackedValue, maxPackedValue
+	}
+	return uint(uint64(p) & (maxPackedValue - 1)),
+		uint((uint64(p) >> logMaxPackedValue) & (maxPackedValue - 1)),
+		uint((uint64(p) >> (2 * logMaxPackedValue)) & (maxPackedValue - 1))
+}
+```
+
+pallocSum是一个简单的uint64，分为开头(start)、中间(max)、末尾(end)3部分。pallocSum的开头和末尾各占21bit，中间部分占22bit，他们分别包含了这个区域中的连续空闲内存页的信息，包括开头有多少连续内存页，最多有多少连续内存页，末尾有多少连续内存页。对于最顶层的节点，由于其max位为22bit,因此一颗完整的基数树最多代表2<sup>21</sup>pages=16GB内存。
+
+在Go语言中，存储了一个特别的字段searchAddr，用于搜索可用内存的。searchAddr前面的地址一定是已分配过的，因此在查找时，只需要向searchAddr地址的后方查找即可跳过已经查找的节点，减少查找的时间。
+
+在第1次查找中，会从当前searchAddr的chunk块中查找是否有对应大小的连续空间。chunk块的每个page（8KB）都有位图表明其是否已经被分配。
+
+每个chunk都有1个pallocData结构，其中pallocBits管理器分配的位图。pallocBits是uint64，有8字节，由于其每一位对应一个page，因此pallocBits一共对应了64*8=512KB，恰好是一个chunk块的大小。
+
+```go
+// pallocData encapsulates pallocBits and a bitmap for
+// whether or not a given page is scavenged in a single
+// structure. It's effectively a pallocBits with
+// additional functionality.
+//
+// Update the comment on (*pageAlloc).chunks should this
+// structure change.
+type pallocData struct {
+	pallocBits
+	scavenged pageBits
+}
+// pallocBits is a bitmap that tracks page allocations for at most one
+// palloc chunk.
+//
+// The precise representation is an implementation detail, but for the
+// sake of documentation, 0s are free pages and 1s are allocated pages.
+type pallocBits pageBits
+
+// pageBits is a bitmap representing one bit per page in a palloc chunk.
+type pageBits [pallocChunkPages / 64]uint64 //[8]uint64
+
+const (
+	// The size of a bitmap chunk, i.e. the amount of bits (that is, pages) to consider
+	// in the bitmap at once.
+	pallocChunkPages    = 1 << logPallocChunkPages //512
+	pallocChunkBytes    = pallocChunkPages * pageSize
+	logPallocChunkPages = 9
+	logPallocChunkBytes = logPallocChunkPages + pageShift
+)
+```
+
+而所有的chunk pallocData都在pageAlloc结构中进行管理。
+
+```go
+type pageAlloc struct {
+	// Radix tree of summaries.
+	//
+	// Each slice's cap represents the whole memory reservation.
+	// Each slice's len reflects the allocator's maximum known
+	// mapped heap address for that level.
+	//
+	// The backing store of each summary level is reserved in init
+	// and may or may not be committed in grow (small address spaces
+	// may commit all the memory in init).
+	//
+	// The purpose of keeping len <= cap is to enforce bounds checks
+	// on the top end of the slice so that instead of an unknown
+	// runtime segmentation fault, we get a much friendlier out-of-bounds
+	// error.
+	//
+	// To iterate over a summary level, use inUse to determine which ranges
+	// are currently available. Otherwise one might try to access
+	// memory which is only Reserved which may result in a hard fault.
+	//
+	// We may still get segmentation faults < len since some of that
+	// memory may not be committed yet.
+	summary [summaryLevels][]pallocSum
+
+	// chunks is a slice of bitmap chunks.
+	//
+	// The total size of chunks is quite large on most 64-bit platforms
+	// (O(GiB) or more) if flattened, so rather than making one large mapping
+	// (which has problems on some platforms, even when PROT_NONE) we use a
+	// two-level sparse array approach similar to the arena index in mheap.
+	//
+	// To find the chunk containing a memory address `a`, do:
+	//   chunkOf(chunkIndex(a))
+	//
+	// Below is a table describing the configuration for chunks for various
+	// heapAddrBits supported by the runtime.
+	//
+	// heapAddrBits | L1 Bits | L2 Bits | L2 Entry Size
+	// ------------------------------------------------
+	// 32           | 0       | 10      | 128 KiB
+	// 33 (iOS)     | 0       | 11      | 256 KiB
+	// 48           | 13      | 13      | 1 MiB
+	//
+	// There's no reason to use the L1 part of chunks on 32-bit, the
+	// address space is small so the L2 is small. For platforms with a
+	// 48-bit address space, we pick the L1 such that the L2 is 1 MiB
+	// in size, which is a good balance between low granularity without
+	// making the impact on BSS too high (note the L1 is stored directly
+	// in pageAlloc).
+	//
+	// To iterate over the bitmap, use inUse to determine which ranges
+	// are currently available. Otherwise one might iterate over unused
+	// ranges.
+	//
+	// TODO(mknyszek): Consider changing the definition of the bitmap
+	// such that 1 means free and 0 means in-use so that summaries and
+	// the bitmaps align better on zero-values.
+	chunks [1 << pallocChunksL1Bits]*[1 << pallocChunksL2Bits]pallocData
+
+	// The address to start an allocation search with. It must never
+	// point to any memory that is not contained in inUse, i.e.
+	// inUse.contains(searchAddr.addr()) must always be true. The one
+	// exception to this rule is that it may take on the value of
+	// maxOffAddr to indicate that the heap is exhausted.
+	//
+	// We guarantee that all valid heap addresses below this value
+	// are allocated and not worth searching.
+	searchAddr offAddr
+
+	...
+}
+```
+
+当内存分配过大或者当前chunk块没有连续的n pages空间时，需要从基数树中从上到下进行查找。基数树有个特性：要分配的内存越大，它能越快地查找到当前基数树是否有连续的满足需求的空间。
+
+查找基数树过程：
+
+从上到下、从左到右地查找每个节点是否符合要求。先计算pallocSum的开头有多少连续空间，如果大于等于npages，则说明找到了可用的空间和地址。如果小于npages，则会计算pallocSum字段的max，即中间有多少连续内存空间。如果max大于等于npages，那么需要继续向基数树当前节点对应的下一级查找，因为max大于npages,说明当前一定有连续空间大于等于npages，但是并不知道具体位置，需要向下一级查找才能找到可用的地址。如果max也不满足，那么还需要将当前pallocSum计算的end与后一节点的start加起来查看是否能够组成大于npage的连续空间。
+
+每一次从基数树中查找到内存，或者时候从操作系统分配到内存时，都需要更新基数树中每个节点的pallocSum。
+
+###### 操作系统内存申请
+
+当在基数树中找不到可用的连续内存时，需要从操作系统中获取内存。从操作系统获取内存的代码是平台独立的，比如在Unix系统中，最终使用了mmap系统调用向操作系统申请内存。
+
+```go
+func sysReserve(v unsafe.Pointer, n uintptr) unsafe.Pointer {
+	p, err := mmap(v, n, _PROT_NONE, _MAP_ANON|_MAP_PRIVATE, -1, 0)
+	if err != 0 {
+		return nil
+	}
+	return p
+}
+```
+
+每一次向操作系统申请的内存大小必须是heapArena的倍数。heapArena是和平台有关的内存大小。
+
+Go语言对于heapArena有精准的管理，精准到每个指针大小的内存信息，每个page对应的mspan信息都有记录。heapArena中的bitmap用每两个bit记录一个指针(8byte)的内存信息，主要用于gc。spans将pageID对应到arena里的mspan。
+
+```go
+// A heapArena stores metadata for a heap arena. heapArenas are stored
+// outside of the Go heap and accessed via the mheap_.arenas index.
+//
+//go:notinheap
+type heapArena struct {
+	// bitmap stores the pointer/scalar bitmap for the words in
+	// this arena. See mbitmap.go for a description. Use the
+	// heapBits type to access this.
+	bitmap [heapArenaBitmapBytes]byte
+
+	// spans maps from virtual address page ID within this arena to *mspan.
+	// For allocated spans, their pages map to the span itself.
+	// For free spans, only the lowest and highest pages map to the span itself.
+	// Internal pages map to an arbitrary span.
+	// For pages that have never been allocated, spans entries are nil.
+	//
+	// Modifications are protected by mheap.lock. Reads can be
+	// performed without locking, but ONLY from indexes that are
+	// known to contain in-use or stack spans. This means there
+	// must not be a safe-point between establishing that an
+	// address is live and looking it up in the spans array.
+	spans [pagesPerArena]*mspan
+
+	// pageInUse is a bitmap that indicates which spans are in
+	// state mSpanInUse. This bitmap is indexed by page number,
+	// but only the bit corresponding to the first page in each
+	// span is used.
+	//
+	// Reads and writes are atomic.
+	pageInUse [pagesPerArena / 8]uint8
+
+	// pageMarks is a bitmap that indicates which spans have any
+	// marked objects on them. Like pageInUse, only the bit
+	// corresponding to the first page in each span is used.
+	//
+	// Writes are done atomically during marking. Reads are
+	// non-atomic and lock-free since they only occur during
+	// sweeping (and hence never race with writes).
+	//
+	// This is used to quickly find whole spans that can be freed.
+	//
+	// TODO(austin): It would be nice if this was uint64 for
+	// faster scanning, but we don't have 64-bit atomic bit
+	// operations.
+	pageMarks [pagesPerArena / 8]uint8
+
+	// pageSpecials is a bitmap that indicates which spans have
+	// specials (finalizers or other). Like pageInUse, only the bit
+	// corresponding to the first page in each span is used.
+	//
+	// Writes are done atomically whenever a special is added to
+	// a span and whenever the last special is removed from a span.
+	// Reads are done atomically to find spans containing specials
+	// during marking.
+	pageSpecials [pagesPerArena / 8]uint8
+
+	// checkmarks stores the debug.gccheckmark state. It is only
+	// used if debug.gccheckmark > 0.
+	checkmarks *checkmarksMap
+
+	// zeroedBase marks the first byte of the first page in this
+	// arena which hasn't been used yet and is therefore already
+	// zero. zeroedBase is relative to the arena base.
+	// Increases monotonically until it hits heapArenaBytes.
+	//
+	// This field is sufficient to determine if an allocation
+	// needs to be zeroed because the page allocator follows an
+	// address-ordered first-fit policy.
+	//
+	// Read atomically and written with an atomic CAS.
+	zeroedBase uintptr
+}
+```
+
+##### 小对象分配
+
+当对象不属于微小对象时，在内存分配时会继续判断其是否属于小对象，小对象指小于32KB的对象。Go语言会计算小对象对应哪一个等级的span，并在指定等级的span中查找。此后的流程就和微小对象的分配一样，精力mcache→mcentral→mheap位图查找→mheap基数树查找→操作系统分配的过程。
+
+##### 大对象分配
+
+大对象指的是大于32KB的对象，内存分配时不与mcache和mcentral沟通，直接通过mheap进行分配，每个大对象都是一个特殊的span，其class为0。
+
+### 总结
+
+Go语言运行时依靠细微的对象切割、极致的多级缓存、精准的位图管理实现了对内存的精细化管理以及快速的内存访问，同时减少了内存的碎片。
+
 ## 19. 垃圾回收（GC）初探
+
+垃圾回收作为内存管理的一部分，包含3个重要的功能：分配和管理新对象、识别正在使用的对象、清除不再使用的对象。
 
 ## 20. 深入垃圾回收全流程
 
