@@ -2487,7 +2487,7 @@ type heapArena struct {
 
 ##### 小对象分配
 
-当对象不属于微小对象时，在内存分配时会继续判断其是否属于小对象，小对象指小于32KB的对象。Go语言会计算小对象对应哪一个等级的span，并在指定等级的span中查找。此后的流程就和微小对象的分配一样，精力mcache→mcentral→mheap位图查找→mheap基数树查找→操作系统分配的过程。
+当对象不属于微小对象时，在内存分配时会继续判断其是否属于小对象，小对象指小于32KB的对象。Go语言会计算小对象对应哪一个等级的span，并在指定等级的span中查找。此后的流程就和微小对象的分配一样，经历mcache→mcentral→mheap位图查找→mheap基数树查找→操作系统分配的过程。
 
 ##### 大对象分配
 
@@ -2501,7 +2501,355 @@ Go语言运行时依靠细微的对象切割、极致的多级缓存、精准的
 
 垃圾回收作为内存管理的一部分，包含3个重要的功能：分配和管理新对象、识别正在使用的对象、清除不再使用的对象。
 
+### 垃圾回收的作用
+
+* 减少错误和复杂性 具有垃圾回收的语言屏蔽了内存管理的复杂性，开发者可以更好的关注核心的业务逻辑，避免悬空指针、多次释放等手动释放管理内存时出现的问题。
+
+* 解耦 具有垃圾回收功能的语言将垃圾收集的工作托管给了具有全局视野的运行时代码。开发者编写的业务代码将真正实现解耦，从而有利于开发、调试，并开发出更大规模的、高并发的项目。
+
+  垃圾回收并不是在任何场景下都适用的，因为垃圾回收带来了额外的成本，需要保存内存的状态信息并扫描内存，很多时候还需要中断整个程序（STW技术）来处理垃圾回收。垃圾回收的常见指标包括程序暂停时间、空间开销、回收的及时性等，根据设计目标的侧重点不同有不同的垃圾回收算法。
+
+### 垃圾回收的5种经典算法
+
+* 标记-清扫
+
+标记-清扫算法分为两个主要阶段，第1阶段是扫描并标记当前活着的对象，第2阶段是清扫没有被标记的垃圾对象。因此，标记-清扫算法是一种间接的垃圾回收算法，它不直接查找垃圾对象，而是通过活着的对象推断出垃圾对象。
+
+扫描一般从栈上的根对象开始，只要对象引用了其他堆对象，就会一直向下扫描，因此可以采用深度优先搜索或者广度优先搜索的方式进行扫描。在扫描阶段，为了有效管理扫描对象的状态，可以通过颜色对对象的状态进行抽象。在Go语言中，使用了经典的三色标记算法。
+
+标记-清扫算法的主要缺点在于可能产生内存碎片或者空洞，这会导致新对象分配失败。
+
+* 标记-压缩
+
+标记-压缩算法通过将分散的、活着的对象移动到更紧密的空间来解决内存碎片问题。标记-压缩算法分为标记与压缩两个阶段。标记过程与标记-清扫算法类似，压缩阶段需要扫描活着的对象并将其压缩到空闲的区域，这可以保证压缩后的空间更紧凑，从而解决内存碎片问题。同时，压缩后的空间能以更快的速度查找到空闲的内存区域（在已经使用内存的后方）。
+
+标记-压缩算法的缺点在于内存对象在内存的位置是随机的，这常常会破坏缓存的局部性，并且需要一些额外空间来标记当前对象已经移动到了其他地方。在压缩阶段，如果B对象发生了转移，那么必须更新所有引用了B对象的A对象的指针，增加了实现的复杂性。
+
+* 半空间复制
+
+半空间复制是一种空间换时间的算法。经典的半空间复制算法只能使用一般的内存空间，保留另一半内存空间用于快速压缩内存。
+
+半空间复制的压缩性消除了内存碎片的问题，同时其压缩时间比标记-压缩算法更短。半空间复制不分阶段，在扫描根对象时就可以直接压缩，每个扫描到的对象都会从fromspace的空间复制到tospace。一旦扫描完成，就会得到一个压缩后的副本。
+
+* 引用计数
+
+引用计数是一种简单直接的识别垃圾对象的算法。每个对象都包含一个引用计数，每当其他对象引用了此对象时，引用计数就会增加。反之，取消引用后，引用计数就会减少。一旦引用计数为0，就表明该对象为垃圾对象，需要被回收。
+
+引用计数算法简单搞笑，在垃圾回收阶段不需要额外占用大量内存，但它也有自己的缺点：一些没有破坏性的操作，比如只读操作、循环迭代操作也需要更新引用计数，栈上的内存操作或寄存器操作更新引用计数是难以接受的。同时，引用计数必须原子更新，并发操作同一个对象会导致引用计数难以处理自引用的对象。
+
+* 分代GC
+
+分代GC指将对象按照存活时间划分。使用这种算法的前提是死去的对象一般都是刚创建不久的，因此没有必要反复的扫描旧对象，这大概率会加快垃圾回收的速度，提升处理能力和吞吐量，减少程序暂停的时间。但是这种算法没有办法及时回收老一代的对象，并且需要额外开销引用区分新老对象，特别是在有多代对象的时候。
+
+以上五种算法在实践中都有许多微妙的变化，而不是直接使用的。
+
+### Go语言中的垃圾回收
+
+Go语言采用了并发三色标记算法进行回收。
+
+三色标记法：
+
+1. 0初始状态下所有对象都是白色的。
+2. 从根节点开始遍历所有对象，把遍历到的对象变成灰色对象
+3. 遍历灰色对象，将灰色对象引用的对象也变成灰色对象，然后将遍历过的灰色对象变成黑色对象。
+4. 循环步骤3，直到灰色对象全部变黑色。
+5. 通过写屏障(write-barrier)检测对象有变化，重复以上操作
+6. 收集所有白色对象（垃圾）
+
+Go1.0是单协程垃圾回收，在垃圾回收开始阶段需要停止所有的用户协程，并且在垃圾回收阶段只有一个协程在执行垃圾回收。
+
+Go1.1之后，垃圾回收由多个协程并行执行，大大加快了垃圾回收的速度，但是这个阶段还是不允许用户协程执行。
+
+Go1.5对垃圾回收进行了重大更新，允许用户协程与后台的垃圾回收同时执行，大大降低了用户协程暂停的时间（从300ms左右降低到了40ms）。
+
+Go1.6大幅度减少了STW期间的任务，使得用户协程暂停的时间从40ms左右降到了5ms。
+
+Go1.8使用了混合写屏障技术消除了栈重新扫描的时间，将用户协程暂停的时间降低到了0.5ms左右。这对于绝大部分场景来说几乎是无感知的。
+
 ## 20. 深入垃圾回收全流程
+
+### 垃圾回收循环
+
+Go语言的垃圾回收循环大致会经过以下几个阶段。当内存到达了垃圾回收的阈值后，将触发新一轮的垃圾回收。之后会先后经历标记准备阶段、并行标记阶段、标记终止阶段及垃圾清扫阶段。在并行标记阶段引入了辅助标记技术，在垃圾清扫阶段还引入了辅助清扫、系统驻留内存清除技术。
+
+![image-20220916165835659](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202209161658743.png)
+
+#### 标记准备阶段
+
+标记准备阶段最主要的任务是清扫上一阶段GC遗留的需要清扫的对象，因为使用了懒清扫算法，所以当执行下一次GC时，可能还有垃圾对象没有被清扫。同时，标记准备阶段会重置各种状态和统计指标、启动专门用于标记的协程、统计需要扫描的任务数量、开启写屏障、启动标记协程等。标记准备阶段是初始阶段，执行轻量级的任务。
+
+标记准备阶段会为每个逻辑处理器P启动一个标记协程，但并不是所有的标记协程都有执行的机会，因为在标记阶段，标记协程和正常执行用户代码的协程需要并行，以减少GC给用户程序带来的影响。
+
+##### 计算标记协程的数量
+
+Go语言规定后台标记协程消耗的CPU应该接近25%。
+
+```go
+// startCycle resets the GC controller's state and computes estimates
+// for a new GC cycle. The caller must hold worldsema and the world
+// must be stopped.
+func (c *gcControllerState) startCycle() {
+    ...
+    // Compute the background mark utilization goal. In general,
+	// this may not come out exactly. We round the number of
+	// dedicated workers so that the utilization is closest to
+	// 25%. For small GOMAXPROCS, this would introduce too much
+	// error, so we add fractional workers in that case.
+    // gcBackgroundUtilization = 0.25
+	totalUtilizationGoal := float64(gomaxprocs) * gcBackgroundUtilization
+	c.dedicatedMarkWorkersNeeded = int64(totalUtilizationGoal + 0.5)
+	utilError := float64(c.dedicatedMarkWorkersNeeded)/totalUtilizationGoal - 1
+	const maxUtilError = 0.3
+	if utilError < -maxUtilError || utilError > maxUtilError {
+		// Rounding put us more than 30% off our goal. With
+		// gcBackgroundUtilization of 25%, this happens for
+		// GOMAXPROCS<=3 or GOMAXPROCS=6. Enable fractional
+		// workers to compensate.
+		if float64(c.dedicatedMarkWorkersNeeded) > totalUtilizationGoal {
+			// Too many dedicated workers.
+			c.dedicatedMarkWorkersNeeded--
+		}
+		c.fractionalUtilizationGoal = (totalUtilizationGoal - float64(c.dedicatedMarkWorkersNeeded)) / float64(gomaxprocs)
+	} else {
+		c.fractionalUtilizationGoal = 0
+	}
+
+	// In STW mode, we just want dedicated workers.
+	if debug.gcstoptheworld > 0 {
+		c.dedicatedMarkWorkersNeeded = int64(gomaxprocs)
+		c.fractionalUtilizationGoal = 0
+	}
+
+	// Clear per-P state
+	for _, p := range allp {
+		p.gcAssistTime = 0
+		p.gcFractionalMarkTime = 0
+	}
+
+	// Compute initial values for controls that are updated
+	// throughout the cycle.
+	c.revise()
+
+	if debug.gcpacertrace > 0 {
+		assistRatio := float64frombits(atomic.Load64(&c.assistWorkPerByte))
+		print("pacer: assist ratio=", assistRatio,
+			" (scan ", gcController.heapScan>>20, " MB in ",
+			work.initialHeapLive>>20, "->",
+			c.heapGoal>>20, " MB)",
+			" workers=", c.dedicatedMarkWorkersNeeded,
+			"+", c.fractionalUtilizationGoal, "\n")
+	}
+}
+```
+
+`dedicatedMarkWorkersNeeded`代表执行完整的后台标记协程的数量。例如当P=4，`dedicatedMarkWorkersNeeded`=1。`fractionalUtilizationGoal`是一个附加的参数，它的值小于1，专门为P为1、2、3、6时而设计的。例如当P=2，它的值是0.25。代表着每个P在标记阶段需要花费25%的时间执行后台标记协程。
+
+![image-20220919161052310](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202209191610383.png)
+
+在总的标记周期t内，每个P都需要花费25%的时间来执行后台标记工作。当超出时间后，当前的后台协程可以被抢占，从而执行其他协程。
+
+##### 切换到后台标记协程
+
+在标记准备阶段执行了STW，此时暂停了所有的协程。当关闭STW准备再次启动所有协程时，每个逻辑处理器P都会进行新的一轮调度循环。
+
+```go
+func schedule(){
+    ...
+    //正在GC,后台标记协程
+    if gp == nil && gcBlackenEnabled != 0 {
+		gp = gcController.findRunnableGCWorker(_g_.m.p.ptr())
+		if gp != nil {
+			tryWakeP = true
+		}
+	}
+    ...
+}
+
+// findRunnableGCWorker returns a background mark worker for _p_ if it
+// should be run. This must only be called when gcBlackenEnabled != 0.
+func (c *gcControllerState) findRunnableGCWorker(_p_ *p) *g {
+	if gcBlackenEnabled == 0 {
+		throw("gcControllerState.findRunnable: blackening not enabled")
+	}
+
+	if !gcMarkWorkAvailable(_p_) {
+		// No work to be done right now. This can happen at
+		// the end of the mark phase when there are still
+		// assists tapering off. Don't bother running a worker
+		// now because it'll just return immediately.
+		return nil
+	}
+
+	// Grab a worker before we commit to running below.
+	node := (*gcBgMarkWorkerNode)(gcBgMarkWorkerPool.pop())
+	if node == nil {
+		// There is at least one worker per P, so normally there are
+		// enough workers to run on all Ps, if necessary. However, once
+		// a worker enters gcMarkDone it may park without rejoining the
+		// pool, thus freeing a P with no corresponding worker.
+		// gcMarkDone never depends on another worker doing work, so it
+		// is safe to simply do nothing here.
+		//
+		// If gcMarkDone bails out without completing the mark phase,
+		// it will always do so with queued global work. Thus, that P
+		// will be immediately eligible to re-run the worker G it was
+		// just using, ensuring work can complete.
+		return nil
+	}
+
+	decIfPositive := func(ptr *int64) bool {
+		for {
+			v := atomic.Loadint64(ptr)
+			if v <= 0 {
+				return false
+			}
+
+			if atomic.Casint64(ptr, v, v-1) {
+				return true
+			}
+		}
+	}
+
+	if decIfPositive(&c.dedicatedMarkWorkersNeeded) {
+		// This P is now dedicated to marking until the end of
+		// the concurrent mark phase.
+		_p_.gcMarkWorkerMode = gcMarkWorkerDedicatedMode
+	} else if c.fractionalUtilizationGoal == 0 {
+		// No need for fractional workers.
+		gcBgMarkWorkerPool.push(&node.node)
+		return nil
+	} else {
+		// Is this P behind on the fractional utilization
+		// goal?
+		//
+		// This should be kept in sync with pollFractionalWorkerExit.
+		delta := nanotime() - c.markStartTime
+		if delta > 0 && float64(_p_.gcFractionalMarkTime)/float64(delta) > c.fractionalUtilizationGoal {
+			// Nope. No need to run a fractional worker.
+			gcBgMarkWorkerPool.push(&node.node)
+			return nil
+		}
+		// Run a fractional worker.
+		_p_.gcMarkWorkerMode = gcMarkWorkerFractionalMode
+	}
+
+	// Run the background mark worker.
+	gp := node.gp.ptr()
+	casgstatus(gp, _Gwaiting, _Grunnable)
+	if trace.enabled {
+		traceGoUnpark(gp, 0)
+	}
+	return gp
+}
+```
+
+在`findRunnableGCWorker`函数中，如果`dedicatedMarkWorkersNeeded`大于0，当前协程立即执行后台标记任务。如果`fractionalUtilizationGoal`大于0，并且当前逻辑处理器P执行标记任务的时间小于`fractionalUtilizationGoal`*当前标记周期的时间。则仍然会执行后台标记任务，但并不会在整个标记周期内一直执行。此时，后台标记协程的运行模式会切换为`gcMarkWorkerFractionalMode`。
+
+#### 并发标记阶段
+
+在并发标记阶段，后台标记协程可以与执行用户代码的协程并行。Go语言的目标就是后台标记协程占用CPU的时间为25%，以最大限度的避免因执行GC而中断或减慢用户协程的执行。后台标记任务有三种不同的模式：
+
+* gcMarkWorkerDedicatedMode 代表处理器专门负责标记对象，不会被调度器抢占。
+
+* gcMarkWorkerFractionalMode 代表协助后台标记，在标记阶段到达目标时间后，会自动退出。
+
+* gcMarkWorkerIdleMode 代表当处理器没有查找到可以执行的协程时，执行垃圾收集的标记任务，直到被抢占。
+
+标记阶段的核心逻辑位于`runtime.gcDrain`函数，其中第2个参数为后台标记flag。后台标记flag有4种，`gcDrainUntilPreempt`标记代表当前标记协程处于可以被抢占的状态。`gcDrainFlushBgCredit`标记会计算后台完成的标记任务量以减少并行标记期间用户协程执行辅助垃圾收集的工作流。`gcDrainIdle`标记对应`gcMarkWorkerIdleMode` 模式，表示当处理器上包含其他待执行的协程时，标记协程退出。`gcDrainFractional`标记对应`gcMarkWorkerFractionalMode` 模式，表示后台标记协程到达目标时间后退出。
+
+```go
+// gcDrain scans roots and objects in work buffers, blackening grey
+// objects until it is unable to get more work. It may return before
+// GC is done; it's the caller's responsibility to balance work from
+// other Ps.
+//
+// If flags&gcDrainUntilPreempt != 0, gcDrain returns when g.preempt
+// is set.
+//
+// If flags&gcDrainIdle != 0, gcDrain returns when there is other work
+// to do.
+//
+// If flags&gcDrainFractional != 0, gcDrain self-preempts when
+// pollFractionalWorkerExit() returns true. This implies
+// gcDrainNoBlock.
+//
+// If flags&gcDrainFlushBgCredit != 0, gcDrain flushes scan work
+// credit to gcController.bgScanCredit every gcCreditSlack units of
+// scan work.
+//
+// gcDrain will always return if there is a pending STW.
+//
+//go:nowritebarrier
+func gcDrain(gcw *gcWork, flags gcDrainFlags) {...}
+```
+
+在`gcMarkWorkerDedicatedMode` 模式下，会一直执行后台标记任务，这意味着当前逻辑处理器P本地队列的协程将一直得不到执行，这是不能接受的。所以在Go语言中的做法是限制性可以被抢占的后台标记任务，如果标记协程已经被其他协程抢占，那么当前的逻辑处理器P并不会执行其他协程，而是将其他协程转移到全局队列中，并取消`gcDrainUntilPreempt`标志，进入不能被抢占模式。
+
+```go
+switch pp.gcMarkWorkerMode {
+			default:
+				throw("gcBgMarkWorker: unexpected gcMarkWorkerMode")
+			case gcMarkWorkerDedicatedMode:
+				gcDrain(&pp.gcw, gcDrainUntilPreempt|gcDrainFlushBgCredit)
+				if gp.preempt {
+					// We were preempted. This is
+					// a useful signal to kick
+					// everything out of the run
+					// queue so it can run
+					// somewhere else.
+					if drainQ, n := runqdrain(pp); n > 0 {
+						lock(&sched.lock)
+						globrunqputbatch(&drainQ, int32(n))
+						unlock(&sched.lock)
+					}
+				}
+				// Go back to draining, this time
+				// without preemption.
+				gcDrain(&pp.gcw, gcDrainFlushBgCredit)
+			case gcMarkWorkerFractionalMode:
+				gcDrain(&pp.gcw, gcDrainFractional|gcDrainUntilPreempt|gcDrainFlushBgCredit)
+			case gcMarkWorkerIdleMode:
+				gcDrain(&pp.gcw, gcDrainIdle|gcDrainUntilPreempt|gcDrainFlushBgCredit)
+			}
+```
+
+`gcMarkWorkerFractionalMode`和`gcMarkWorkerIdleMode`模式都允许被抢占。`gcMarkWorkerFractionalMode`模式加上了gcDrainFractional标记表明当前标记协程会在到达目标时间后退出。`gcMarkWorkerIdleMode`模式加上了`gcDrainIdle`标记表明当发现有其他协程可以运行时退出当前标记协程。三种模式都加上了`gcDrainFlushBgCredit`标记用于计算后台完成的标记任务量，并唤醒之前由于分配内存太频繁而陷入等待的用户协程。
+
+##### 根对象扫描
+
+扫描的第一阶段就是扫描根对象。在最开始的标记准备阶段会统计这次GC一共要扫描多少对象。每个具体的序号都对应着要扫描的对象。
+
+```go
+			job := atomic.Xadd(&work.markrootNext, +1) - 1
+```
+
+`work.markrootNext`必须原子增加，保证多个后台标记协程能够并发执行不同任务。根对象就是最基本的对象，从根对象出发，可以找到所有的引用对象。在Go语言中，根对象包括全局变量（在.bss和.data段内存中）、span中finalizer的任务数量以及所有的协程栈。finalizer是Go语言中的对象绑定析构器，当对象的内存释放后，需要调用析构器函数，从而完整释放资源。
+
+##### 全局变量扫描
+
+扫描全局变量需要编译时和运行时的共同努力。在运行时才能确定全局变量分配到虚拟内存的哪一块区域，在编译时，可以确定全局变量哪些位置在包含指针。信息位于位图ptrmask字段中。ptrmask的每个bit都对应.data段中的一个指针的大小（8KB），bit位为1代表当前位置是一个指针，这时，需要求出当前的指针在堆区的哪一个对象上，并将当前对象标记为灰色。
+
+![image-20220919172712359](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202209191727443.png)
+
+如何通过指针找到指针对应的对象位置呢？这依赖于Go语言对内存的精细化管理，先找到指针在哪一个heapArena中，通过heapArena可以找到其对应的mspan，进而找到其位于mspan中第几个元素中。当找到此元素后，会将`gcmarkBits`位图对应的bit设置为1，表明其已经被标记，同时将该元素(对象)放入标记队列中。
+
+##### finalizer
+
+##### 栈扫描
+
+##### 栈对象
+
+##### 扫描灰色对象
+
+##### 辅助标记
+
+
+
+#### 标记终止阶段
+
+#### 垃圾清扫
+
+
 
 ## 21. 调试：特征分析和事件追踪
 
