@@ -897,7 +897,7 @@ name代表通道的名称，chan T代表通道的类型，T代表通道中的元
 
 #### 写入
 
-`c <- 5`对于无缓冲通道，能够向通道写入数据的前提是必须有另一个协程在读取通道。否欧泽当前通道会陷入休眠状态，知道能够向通道成功写入数据。无缓冲通道的读与写应该在不同协程当中。
+`c <- 5`对于无缓冲通道，能够向通道写入数据的前提是必须有另一个协程在读取通道。否则当前通道会陷入休眠状态，知道能够向通道成功写入数据。无缓冲通道的读与写应该在不同协程当中。
 
 #### 读取
 
@@ -2825,7 +2825,7 @@ switch pp.gcMarkWorkerMode {
 
 `work.markrootNext`必须原子增加，保证多个后台标记协程能够并发执行不同任务。根对象就是最基本的对象，从根对象出发，可以找到所有的引用对象。在Go语言中，根对象包括全局变量（在.bss和.data段内存中）、span中finalizer的任务数量以及所有的协程栈。finalizer是Go语言中的对象绑定析构器，当对象的内存释放后，需要调用析构器函数，从而完整释放资源。
 
-##### 全局变量扫描
+###### 全局变量扫描
 
 扫描全局变量需要编译时和运行时的共同努力。在运行时才能确定全局变量分配到虚拟内存的哪一块区域，在编译时，可以确定全局变量哪些位置在包含指针。信息位于位图ptrmask字段中。ptrmask的每个bit都对应.data段中的一个指针的大小（8KB），bit位为1代表当前位置是一个指针，这时，需要求出当前的指针在堆区的哪一个对象上，并将当前对象标记为灰色。
 
@@ -2833,23 +2833,602 @@ switch pp.gcMarkWorkerMode {
 
 如何通过指针找到指针对应的对象位置呢？这依赖于Go语言对内存的精细化管理，先找到指针在哪一个heapArena中，通过heapArena可以找到其对应的mspan，进而找到其位于mspan中第几个元素中。当找到此元素后，会将`gcmarkBits`位图对应的bit设置为1，表明其已经被标记，同时将该元素(对象)放入标记队列中。
 
-##### finalizer
+###### finalizer
 
-##### 栈扫描
+finalizer是特殊的对象，在对象释放后会被调用的析构器，用于资源释放。析构器不会被栈上或全局变量引用，需要单独处理。
 
-##### 栈对象
+在标记期间，后台标记协程会遍历mspan的specials链表，扫描finalizer所位于的元素（对象），并扫描当前元素（对象）。在这里并不能把finalizer所位于的span对象加入根对象中，否则我们将时区回收该对象的机会。同时需要扫描析构器字段fn，因为fn可能指向了堆中的内存，并可能被回收。
+
+```go
+//runtime/mgcmark.go:305 markrootSpans() 
+			for sp := s.specials; sp != nil; sp = sp.next {
+				if sp.kind != _KindSpecialFinalizer {
+					continue
+				}
+				// don't mark finalized object, but scan it so we
+				// retain everything it points to.
+				spf := (*specialfinalizer)(unsafe.Pointer(sp))
+				// A finalizer can be set for an inner byte of an object, find object beginning.
+				p := s.base() + uintptr(spf.special.offset)/s.elemsize*s.elemsize
+
+				// Mark everything that can be reached from
+				// the object (but *not* the object itself or
+				// we'll never collect it).
+				scanobject(p, gcw)
+
+				// The special itself is a root.
+				scanblock(uintptr(unsafe.Pointer(&spf.fn)), sys.PtrSize, &oneptrmask[0], gcw, nil)
+			}
+```
+
+使用finalizer的例子：Go语言的文件描述符使用了finalizer，这样在文件描述符不再被使用时，即便用户忘记了手动关闭文件描述符，在GC的时候也可以自动调用finalizer关闭文件描述符。finalizer可以将资源的释放托管给垃圾回收。比如在CGO场景下，Go语言调用C函数时，C函数分配的内存不受Go垃圾回收的管理，我们常常借助defer在调用结束时手动释放内存，也可以将其改成finalizer形式。
+
+###### 栈扫描
+
+栈扫描是根对象扫描中最重要的部分。栈扫描需要编译时和运行时共同努力，运行时能够计算出当前协程栈的所有栈帧信息，编译时能够知道栈上有哪些指针，以及对象中的哪一部分包含了指针。运行时首先计算出栈帧布局，每一个栈帧都代表一个函数，运行时可以得知当前栈帧的函数参数、函数本地变量、寄存器SP、BP等一系列信息。每个栈帧函数的参数和局部变量都需要进行扫描，确认该对象是否仍然在使用，如果在使用则需要扫描位图判断对象中是否包含指针。
+
+```go
+// Scan a stack frame: local variables and function arguments/results.
+//go:nowritebarrier
+func scanframeworker(frame *stkframe, state *stackScanState, gcw *gcWork) {
+	...
+
+	locals, args, objs := getStackMap(frame, &state.cache, false)
+
+	// Scan local variables if stack frame has been allocated.
+    // 扫描局部变量
+	if locals.n > 0 {
+		size := uintptr(locals.n) * sys.PtrSize
+		scanblock(frame.varp-size, size, locals.bytedata, gcw, state)
+	}
+	// 扫描函数参数
+	// Scan arguments.
+	if args.n > 0 {
+		scanblock(frame.argp, uintptr(args.n)*sys.PtrSize, args.bytedata, gcw, state)
+	}
+
+	// Add all stack objects to the stack object list.
+	if frame.varp != 0 {
+		// varp is 0 for defers, where there are no locals.
+		// In that case, there can't be a pointer to its args, either.
+		// (And all args would be scanned above anyway.)
+		for i, obj := range objs {
+			off := obj.off
+			base := frame.varp // locals base pointer
+			if off >= 0 {
+				base = frame.argp // arguments and return values base pointer
+			}
+			ptr := base + uintptr(off)
+			if ptr < frame.sp {
+				// object hasn't been allocated in the frame yet.
+				continue
+			}
+			if stackTraceDebug {
+				println("stkobj at", hex(ptr), "of size", obj.size)
+			}
+			state.addObject(ptr, &objs[i])
+		}
+	}
+}
+```
+
+###### 栈对象
+
+为了解决栈扫描采取保守算法而造成的内存泄漏问题，Go语言引用了栈对象的概念。栈对象是在栈上能够被寻址的对象。不是所有对象都会存储在栈上，比如存储在寄存器中的变量就不能被寻址。编译器会在编译时将所有的栈对象都记录下来，同时编译器将追踪栈中所有可能指向栈对象的指针。在垃圾回收期间，所有栈对象都会被存储到一颗二叉搜索树中。
 
 ##### 扫描灰色对象
 
+从根对象的收集来看，全局变量、析构器、所有协程的栈都会被扫描，从而标记目前还在使用的内存对象。下一步就是从这些被标记为灰色的内存对象触发，进一步标记整个堆内存中活着的对象。在进行根对象扫描时，会将标记的对象放入本地队列中，如果本地队列放不下，则放到全局队列中，这样可以最大限度地避免使用锁，在本地缓存的队列可以被逻辑处理器P无锁访问。在进行扫描时，先消费本地队列中找到的标记对象，如果本地队列为空，则加锁获取全局队列中存储的对象。
+
+在标记期间，会循环往复地从本地标记队列获取灰色对象，灰色对象扫描到的白色对象仍然会被放入标记队列中，如果扫描到已经标记的对象则忽略，一直到队列中的任务为空为止。
+
+```go
+	// Drain heap marking jobs.
+	// Stop if we're preemptible or if someone wants to STW.
+	for !(gp.preempt && (preemptible || atomic.Load(&sched.gcwaiting) != 0)) {
+		// Try to keep work available on the global queue. We used to
+		// check if there were waiting workers, but it's better to
+		// just keep work available than to make workers wait. In the
+		// worst case, we'll do O(log(_WorkbufSize)) unnecessary
+		// balances.
+        //从本地标记队列中获取对象，获取不到则从全局标记队列获取
+		if work.full == 0 {
+			gcw.balance()
+		}
+
+		b := gcw.tryGetFast()
+		if b == 0 {
+            //阻塞获取
+			b = gcw.tryGet()
+			if b == 0 {
+				// Flush the write barrier
+				// buffer; this may create
+				// more work.
+				wbBufFlush(nil, 0)
+				b = gcw.tryGet()
+			}
+		}
+		if b == 0 {
+			// Unable to get work.
+			break
+		}
+        //扫描获取的对象
+		scanobject(b, gcw)
+		...
+    }
+```
+
+对象的扫描过程位于scanobject函数中。在对所有对象的内存逐个进行扫描，查看对象内存中是否包含指针，如果对象中没有存储指针，则根本不需要花时间进行检查。为了实现更快的查找，Go语言在内存分配时记录了对象中是否包含指针等元信息。heapArena有一个重要的bitmap字段用位图的形式记录了每个指针大小（8KB）的内存中的信息。每个指针大小的内存都会有2个bit分别表示当前内存是否应该继续扫描及是否包含指针。bitmap位图记录了内存是否需要被扫描以及是否包含指针。bitmap中1个byte大小的空间对应了虚拟内存中4个指针大小的空间。bitmap中前4位为扫描位，后4位为指针位，分别对应指定的指针大小的空间是否需要继续进行扫描及是否包含指针。
+
+![image-20220921143745414](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202209211437533.png)
+
+当需要继续扫描并且发现了当前有指针时，就需要取出指针的值，并对其进行扫描。后续操作与全局变量扫描类似，根据指针查找到span中的对象，如果发现引用的是堆中的白色对象，则标记该对象并将该对象放入本地队列中。
+
 ##### 辅助标记
 
+Go1.5引入了并发标记后，带来了许多新的问题。比如：在并发标记阶段，扫描内存的同时用户协程也不断被分配内存，当用户协程的内存分配速度快到后台标记协程来不及扫描时，GC标记阶段将永远不会结束，从而无法完成完整的GC周期，造成内存泄漏。为了解决这样的问题，引入辅助标记算法。辅助标记必须在垃圾回收的标记阶段进行，由于用户协程被分配了超过限度的内存而不得不将其暂停并切换到辅助标记工作。
 
+扫描策略可以看成是X=assistWorkPerByte * M。X为后台标记协程需要多扫描的内存，M为新分配的内存。
+
+在GC并发标记阶段，当用户协程分配内存时，会先检查是否已经完成了制定的扫描工作。当前协程的`gcAssistBytes`字段代表当前协程可以被分配的内存大小，类似资产池。当本地的资产池不足时（gcAssistBytes<0），会尝试从全局的资产池中获取。用户协程一开始是没有资产的，所有资产都来自后台标记协程。用户协程中的本地资产来自后台标记协程的扫描工作。后台标记协程的扫描工作会增加全局资产池的大小。 如果标记协程已经扫描完成的内存为X，那么意味着全局资产池可以容忍用户协程分配的内存数量为M=X/assistWorkPerByte。这种机制保证了在GC并发标记时，工作协程分配的内存数量不会太多也不会太少。
+
+```go
+	// assistG is the G to charge for this allocation, or nil if0
+	// GC is not currently active.
+	var assistG *g
+	// gcBlackenEnabled在GC的标记阶段会开启
+	if gcBlackenEnabled != 0 {
+		// Charge the current user G for this allocation.
+		assistG = getg()
+		if assistG.m.curg != nil {
+			assistG = assistG.m.curg
+		}
+		// Charge the allocation against the G. We'll account
+		// for internal fragmentation at the end of mallocgc.
+		assistG.gcAssistBytes -= int64(size)
+		// 需要辅助标记
+		if assistG.gcAssistBytes < 0 {
+			// This G is in debt. Assist the GC to correct
+			// this before allocating. This must happen
+			// before disabling preemption.
+            // 尝试从全局资产池获取资产
+			gcAssistAlloc(assistG)
+		}
+	}
+```
+
+如果工作内存在分配内存时，既无法从本地资产池也无法从全局资产池获取资产，那么需要停止工作协程，并执行辅助标记协程。辅助标记协程需要额外扫描的内存大小为assistWorkPerByte * M，当扫描完成指定工作或被抢占时会退出。当辅助标记完成后，如果本地仍然没有足够的资产，则可能是因为当前协程被抢占，也可能是因为当前逻辑处理器的工作池没有多余的标记工作。前一种情况会调用Gosched函数让渡当前辅助标记的执行权利，后一种情况会陷入休眠状态，当后台标记协程扫描了足够的任务后，会刷新全局资产池并将等待中的协程唤醒。
+
+##### 屏障技术
+
+辅助标记解决的是垃圾回收正常结束和循环的问题，屏障技术解决的则是准确性的问题。 保证并发标记准确性需要遵守的原则是强、弱三色不变性。
+
+* 强三色不变性 黑色节点不允许引用白色节点。
+* 弱三色不变性 黑色节点允许引用白色节点，但是该白色节点有其他灰色节点间接的引用（确保不会被遗漏） 
+
+在并发标记写入和删除对象时，可能破坏三色不变性，因此需要屏障技术来维护三色不变性。屏障技术的原则是在写入或删除对象时将可能活着的对象标记为灰色。
+
+Dijistra风格插入屏障：当黑色节点新增了白色节点的引用时，将对应的白色节点改为灰色。
+
+Yuasa删除写屏障：当白色节点被删除了一个引用时，悲观地认为它一定会被一个黑色节点新增引用，所以将它置为灰色。
+
+插入屏障和删除屏障通过在写入和删除时重新标记颜色保证了三色不变性，解决了并发标记期间的准确性问题。但是它们都存在浮动垃圾的问题，插入屏障在删除引用的时候可能标记一个已经变成垃圾的对象，而删除屏障在删除引用时可能把一个垃圾对象标记为灰色。这些是垃圾回收的精度问题，不会影响准确性，因为浮动垃圾会在下一次垃圾回收中被回收。
+
+插入屏障和删除屏障独立存在并能良好工作的前提是并发标记期间所有的写入操作都应用了屏障技术。为了解决重复扫描的问题，Go1.8之后使用了混合写屏障技术，结合了Dijistra和Yuasa两种风格。伪代码如下
+
+```pseudocode
+writePoint(slot,ptr):
+	shade(*slot)
+	shade(ptr)
+	*slot=ptr
+```
+
+在Go语言中，混合写屏障技术的实现依赖编译时和运行时的共同努力。在标记准备阶段的STW阶段会打开写屏障，具体做法是将全局变量writeBarrier.enabled设置为true。
+
+```go
+// The compiler knows about this variable.
+// If you change it, you must change builtin/runtime.go, too.
+// If you change the first four bytes, you must also change the write
+// barrier insertion code.
+var writeBarrier struct {
+	enabled bool    // compiler emits a check of this before calling write barrier
+	pad     [3]byte // compiler uses 32-bit load for "enabled" field
+	needed  bool    // whether we need a write barrier for current GC phase
+	cgo     bool    // whether we need a write barrier for a cgo check
+	alignme uint64  // guarantee alignment so that compiler can use a 32 or 64-bit load
+}
+```
+
+编译器会在所有堆写入或者删除操作前判断当前是否为垃圾回收阶段，如果是则会执行对应的混合写屏障标记对象。Go语言中构建了写屏障指针缓存池，gcWriteBarrier先将所有被标记的指针放入缓存池中，并在容量满后，一次性全部刷新到扫描任务池中。最终这些被标记的指针都将被扫描。汇编代码如下：
+
+```assembly
+CMPL	runtime.writeBarrier(SB),$0
+CALL	runtime.gcWriteBarrier(SB)
+```
 
 #### 标记终止阶段
 
+完成并发标记阶段所有灰色对象的扫描和标记后进入标记终止阶段，标记终止阶段主要完成一些指标，比如统计用时、统计强制开始GC的次数、更新下一次触发GC需要达到的堆目标、关闭写屏障等，并唤醒后台清扫的协程，开始下一阶段的清扫工作。标记终止阶段会再次进入STW。
+
+标记终止阶段的重要任务是计算下一次触发GC时需要达到的堆目标，这叫作垃圾回收的调步算法。调步算法最重要的任务是估计下一次触发GC的最佳时机，这依赖本次GC的阶段差额(GC完成后占用内存和目标内存之间的差距)。如果GC完成后占用内存远小于目标内存，意味着触发GC时间过早，如果占用内存远大于目标内存，则意味着触发GC时间太迟。因此调度算法的第1个目标是min(|目标占用内存-GC完成后的占用内存|)，第2个目标是预计执行标记的CPU占用率接近25%。如果用户协程执行了过多的辅助标记，则会导致GC完成后的占用内存偏小，因为用户协程本来应该用来分配内存的时间用来执行了辅助标记。所以算法将先计算目标内存和GC完成后的内存的偏差：
+$$
+偏差率=(目标增长率-触发率)-(实际增长率-触发率)
+$$
+其中，
+
+* 目标增长率=目标内存/上一次GC完成后的标记内存-1 
+* 触发率=触发GC时的占用内存/上一次GC完成后的标记内存-1 
+* 完成率=GC完成后的内存/上一次GC完成后的标记内存-1
+
+这其实是偏差=(目标内存-触发GC时的占用内存)-(GC完成后的占用内存-触发GC时的占用内存)的变形，为了修复辅助标记带来的偏差，计算辅助标记所用的时间，从而调整(GC完成后的占用内存-触发GC时的占用内存)的大小，因此最终的偏差率为：
+$$
+偏差率=(目标增长率-触发率)-调整率\times(实际增长率-触发率)
+$$
+其中：调整率=GC标记阶段的CPU占用率/目标CPU占用率
+
+```go
+// endCycle computes the trigger ratio for the next cycle.
+// userForced indicates whether the current GC cycle was forced
+// by the application.
+func (c *gcControllerState) endCycle(userForced bool) float64 {
+	if userForced {
+		// Forced GC means this cycle didn't start at the
+		// trigger, so where it finished isn't good
+		// information about how to adjust the trigger.
+		// Just leave it where it is.
+		return c.triggerRatio
+	}
+
+	// Proportional response gain for the trigger controller. Must
+	// be in [0, 1]. Lower values smooth out transient effects but
+	// take longer to respond to phase changes. Higher values
+	// react to phase changes quickly, but are more affected by
+	// transient changes. Values near 1 may be unstable.
+	const triggerGain = 0.5
+
+	// Compute next cycle trigger ratio. First, this computes the
+	// "error" for this cycle; that is, how far off the trigger
+	// was from what it should have been, accounting for both heap
+	// growth and GC CPU utilization. We compute the actual heap
+	// growth during this cycle and scale that by how far off from
+	// the goal CPU utilization we were (to estimate the heap
+	// growth if we had the desired CPU utilization). The
+	// difference between this estimate and the GOGC-based goal
+	// heap growth is the error.
+	goalGrowthRatio := c.effectiveGrowthRatio()
+	actualGrowthRatio := float64(c.heapLive)/float64(c.heapMarked) - 1
+	assistDuration := nanotime() - c.markStartTime
+
+	// Assume background mark hit its utilization goal.
+	utilization := gcBackgroundUtilization
+	// Add assist utilization; avoid divide by zero.
+	if assistDuration > 0 {
+		utilization += float64(c.assistTime) / float64(assistDuration*int64(gomaxprocs))
+	}
+
+	triggerError := goalGrowthRatio - c.triggerRatio - utilization/gcGoalUtilization*(actualGrowthRatio-c.triggerRatio)
+
+	// Finally, we adjust the trigger for next time by this error,
+	// damped by the proportional gain.
+	triggerRatio := c.triggerRatio + triggerGain*triggerError
+
+	if debug.gcpacertrace > 0 {
+		// Print controller state in terms of the design
+		// document.
+		H_m_prev := c.heapMarked
+		h_t := c.triggerRatio
+		H_T := c.trigger
+		h_a := actualGrowthRatio
+		H_a := c.heapLive
+		h_g := goalGrowthRatio
+		H_g := int64(float64(H_m_prev) * (1 + h_g))
+		u_a := utilization
+		u_g := gcGoalUtilization
+		W_a := c.scanWork
+		print("pacer: H_m_prev=", H_m_prev,
+			" h_t=", h_t, " H_T=", H_T,
+			" h_a=", h_a, " H_a=", H_a,
+			" h_g=", h_g, " H_g=", H_g,
+			" u_a=", u_a, " u_g=", u_g,
+			" W_a=", W_a,
+			" goalΔ=", goalGrowthRatio-h_t,
+			" actualΔ=", h_a-h_t,
+			" u_a/u_g=", u_a/u_g,
+			"\n")
+	}
+
+	return triggerRatio
+}
+```
+
+实际增长率和辅助标记的时长都会影响最终的偏差率。目标内存和GC完成后的占用内存偏离越大，偏差率越大。这时，下一次GC的触发率会渐进调整，即每次只调整偏差的一半，公式如下：
+$$
+下次GC触发率=上次GC触发率+1/2\times偏差率
+$$
+计算出下次GC偏差率后，需要计算出目标内存大小，目标内存的计算如下：
+
+```go
+	// Compute the next GC goal, which is when the allocated heap
+	// has grown by GOGC/100 over the heap marked by the last
+	// cycle.
+	goal := ^uint64(0)
+	if c.gcPercent >= 0 {
+		goal = c.heapMarked + c.heapMarked*uint64(c.gcPercent)/100
+	}
+```
+
+goal为下次GC完成后的目标啊内存，它的大小取决于本次GC扫描后的占用内存以及gcpercent的大小。gcpercent可以由用户调用debug.SetGCPercent()函数动态设置。gcpercent默认值为100，代表目标内存是上次GC内存的2倍。当gcpercent小于0，将禁用Go的垃圾回收。还可以通过设置GOGC环境变量来修改gcpercent的大小。
+
+在明确了目标内存后，触发内存的大小可以简单定义如下：
+$$
+触发内存=触发率\times目标内存
+$$
+其中触发率不能大于0.95，也不能小于0.6。
+
 #### 垃圾清扫
 
+垃圾标记工作完成意味着已经追踪到内存中所有活着的对象，之后进入垃圾清扫阶段，将垃圾对象内存回收重用或返还给操作系统。标记结束阶段会调用`gcSweep`函数，该函数会将sweep.g清扫协程的状态变为running，在结束STW阶段并开始重新调度循环时优先清扫协程。
 
+```go
+// gcSweep must be called on the system stack because it acquires the heap
+// lock. See mheap for details.
+//
+// The world must be stopped.
+//
+//go:systemstack
+func gcSweep(mode gcMode) {
+	assertWorldStopped()
+
+	if gcphase != _GCoff {
+		throw("gcSweep being done but phase is not GCoff")
+	}
+
+	lock(&mheap_.lock)
+	mheap_.sweepgen += 2
+	mheap_.sweepDrained = 0
+	mheap_.pagesSwept = 0
+	mheap_.sweepArenas = mheap_.allArenas
+	mheap_.reclaimIndex = 0
+	mheap_.reclaimCredit = 0
+	unlock(&mheap_.lock)
+
+	sweep.centralIndex.clear()
+
+	if !_ConcurrentSweep || mode == gcForceBlockMode {
+		// Special case synchronous sweep.
+		// Record that no proportional sweeping has to happen.
+		lock(&mheap_.lock)
+		mheap_.sweepPagesPerByte = 0
+		unlock(&mheap_.lock)
+		// Sweep all spans eagerly.
+		for sweepone() != ^uintptr(0) {
+			sweep.npausesweep++
+		}
+		// Free workbufs eagerly.
+		prepareFreeWorkbufs()
+		for freeSomeWbufs(false) {
+		}
+		// All "free" events for this mark/sweep cycle have
+		// now happened, so we can make this profile cycle
+		// available immediately.
+		mProf_NextCycle()
+		mProf_Flush()
+		return
+	}
+
+	// Background sweep.
+	lock(&sweep.lock)
+	if sweep.parked {
+		sweep.parked = false
+		ready(sweep.g, 0, true)
+	}
+	unlock(&sweep.lock)
+}
+```
+
+清扫阶段在程序启动时调用的gcenable函数中启动。程序只有一个垃圾清扫协程，并在清扫阶段与用户协程同时进行。
+
+```go
+// gcenable is called after the bulk of the runtime initialization,
+// just before we're about to start letting user code run.
+// It kicks off the background sweeper goroutine, the background
+// scavenger goroutine, and enables GC.
+func gcenable() {
+	// Kick off sweeping and scavenging.
+	gcenable_setup = make(chan int, 2)
+    //启动后台清扫器，与用户态代码并发被调度，归还从内存分配器中申请的内存
+	go bgsweep()
+    //启动后台清扫器，与用户态代码并发被调度，归还从操作系统中申请的内存
+	go bgscavenge()
+	<-gcenable_setup
+	<-gcenable_setup
+	gcenable_setup = nil
+	memstats.enablegc = true // now that runtime is initialized, GC is okay
+}
+```
+
+当清扫协程被唤醒后，会开始垃圾清扫。垃圾清扫采取了懒清扫的策略（执行少量清扫工作后，通过Gosched函数让渡自己的执行权利，不需要一直执行）。因此当触发下一阶段的垃圾回收后，可能有没有被清理的内存，需要先将它们清理完。
+
+```go
+// sweepone sweeps some unswept heap span and returns the number of pages returned
+// to the heap, or ^uintptr(0) if there was nothing to sweep.
+func bgsweep() {
+	sweep.g = getg()
+
+	lockInit(&sweep.lock, lockRankSweep)
+	lock(&sweep.lock)
+	sweep.parked = true
+	gcenable_setup <- 1
+	goparkunlock(&sweep.lock, waitReasonGCSweepWait, traceEvGoBlock, 1)
+	//等待唤醒
+	for {
+        //清扫一个span 然后进入调度（一次只进行少量工作）
+		for sweepone() != ^uintptr(0) {
+			sweep.nbgsweep++
+			Gosched()
+		}
+        //可抢占地释放一些workbufs到堆中
+        //释放一些未使用的标记队列缓冲区到heap
+		for freeSomeWbufs(true) {
+			Gosched()
+		}
+		lock(&sweep.lock)
+		if !isSweepDone() {
+			// This can happen if a GC runs between
+			// gosweepone returning ^0 above
+			// and the lock being acquired.
+			unlock(&sweep.lock)
+			continue
+		}
+		sweep.parked = true
+        //休眠
+		goparkunlock(&sweep.lock, waitReasonGCSweepWait, traceEvGoBlock, 1)
+	}
+}
+```
+
+##### 懒清扫逻辑
+
+清扫是以span为单位进行的，sweepone函数的作用是找到一个span并进行相应的清扫工作。
+
+先从mheap中的sweepSpans队列中取出需要清扫的span：
+
+sweepSpans数组的长度为2，sweepSpans[sweepgen/2%2]保存当前正在使用的span列表，sweepSpans[1-sweepgen/2%2]保存等待清扫的span列表。sweepgen每次清扫时加2，所以sweepSpans[0]、sweepSpans[1]每次清扫时互相交换身份，本次正在使用的span列表为下一次GC待清扫的列表。
+
+```go
+    // partial and full contain two mspan sets: one of swept in-use
+	// spans, and one of unswept in-use spans. These two trade
+	// roles on each GC cycle. The unswept set is drained either by
+	// allocation or by the background sweeper in every GC cycle,
+	// so only two roles are necessary.
+	//
+	// sweepgen is increased by 2 on each GC cycle, so the swept
+	// spans are in partial[sweepgen/2%2] and the unswept spans are in
+	// partial[1-sweepgen/2%2]. Sweeping pops spans from the
+	// unswept set and pushes spans that are still in-use on the
+	// swept set. Likewise, allocating an in-use span pushes it
+	// on the swept set.
+	//
+	// Some parts of the sweeper can sweep arbitrary spans, and hence
+	// can't remove them from the unswept set, but will add the span
+	// to the appropriate swept list. As a result, the parts of the
+	// sweeper and mcentral that do consume from the unswept list may
+	// encounter swept spans, and these should be ignored.
+	partial [2]spanSet // list of spans with a free object
+	full    [2]spanSet // list of spans with no free objects
+
+s := mheap_.nextSpanForSweep()
+
+// nextSpanForSweep finds and pops the next span for sweeping from the
+// central sweep buffers. It returns ownership of the span to the caller.
+// Returns nil if no such span exists.
+func (h *mheap) nextSpanForSweep() *mspan {
+	sg := h.sweepgen
+	for sc := sweep.centralIndex.load(); sc < numSweepClasses; sc++ {
+		spc, full := sc.split()
+		c := &h.central[spc].mcentral
+		var s *mspan
+		if full {
+			s = c.fullUnswept(sg).pop()
+		} else {
+			s = c.partialUnswept(sg).pop()
+		}
+		if s != nil {
+			// Write down that we found something so future sweepers
+			// can start from here.
+			sweep.centralIndex.update(sc)
+			return s
+		}
+	}
+	// Write down that we found nothing.
+	sweep.centralIndex.update(sweepClassDone)
+	return nil
+}
+
+// split returns the underlying span class as well as
+// whether we're interested in the full or partial
+// unswept lists for that class, indicated as a boolean
+// (true means "full").
+func (s sweepClass) split() (spc spanClass, full bool) {
+	return spanClass(s >> 1), s&1 == 0
+}
+
+// fullUnswept returns the spanSet which holds unswept spans without any
+// free slots for this sweepgen.
+func (c *mcentral) fullUnswept(sweepgen uint32) *spanSet {
+	return &c.full[1-sweepgen/2%2]
+}
+
+// partialUnswept returns the spanSet which holds partially-filled
+// unswept spans for this sweepgen.
+func (c *mcentral) partialUnswept(sweepgen uint32) *spanSet {
+	return &c.partial[1-sweepgen/2%2]
+}
+
+// gcSweep must be called on the system stack because it acquires the heap
+// lock. See mheap for details.
+//
+// The world must be stopped.
+//
+//go:systemstack
+func gcSweep(mode gcMode) {
+	assertWorldStopped()
+
+	if gcphase != _GCoff {
+		throw("gcSweep being done but phase is not GCoff")
+	}
+
+	lock(&mheap_.lock)
+	mheap_.sweepgen += 2
+	mheap_.sweepDrained = 0
+	mheap_.pagesSwept = 0
+	mheap_.sweepArenas = mheap_.allArenas
+	mheap_.reclaimIndex = 0
+	mheap_.reclaimCredit = 0
+	unlock(&mheap_.lock)
+    ...
+}
+```
+
+在清扫span期间，最重要的一步是将gcmarkBits位图赋值给allocBits位图。
+
+```go
+    // gcmarkBits becomes the allocBits.
+	// get a fresh cleared gcmarkBits in preparation for next GC
+	s.allocBits = s.gcmarkBits
+	s.gcmarkBits = newMarkBits(s.nelems)
+```
+
+当前gcmarkBits是GC标记后的最新的对象位图，当gcmarkBits中的bit位为1时，代表当前对象是活着的。所以当gcmarkBits中的某一个bit位为1，但是对应的allocBits位图中的bit位为0时，代表这个对象是会被回收的垃圾对象。完成这一切换后，就可以通过位图使用已经是垃圾对象的内存了。如果GC后gcmarkBits的全部bit位都为0，那么意味着当前所有span中的对象都不会再被其他对象引用（大对象特殊，因为其span内部只有一个对象）。
+
+这时，整个span将会被mheap回收，并更新整个基数树，表明当前span的整个空间都可以被程序再次使用。如果当前span的整个空间并不完全为空，那么span会被重新放入sweepSpans正在使用的span列表中。
+
+```go
+			// Return span back to the right mcentral list.
+			if uintptr(nalloc) == s.nelems {
+				mheap_.central[spc].mcentral.fullSwept(sweepgen).push(s)
+			} else {
+				mheap_.central[spc].mcentral.partialSwept(sweepgen).push(s)
+			}
+
+// fullSwept returns the spanSet which holds swept spans without any
+// free slots for this sweepgen.
+func (c *mcentral) fullSwept(sweepgen uint32) *spanSet {
+	return &c.full[sweepgen/2%2]
+}
+
+// partialSwept returns the spanSet which holds partially-filled
+// swept spans for this sweepgen.
+func (c *mcentral) partialSwept(sweepgen uint32) *spanSet {
+	return &c.partial[sweepgen/2%2]
+}
+```
+
+可以看出，这种回收方式并没有直接将内存释放到操作系统中，而是再次组织内存以便能在下次内存分配时利用已经被回收的内存。
+
+##### 辅助清扫
+
+为了规避懒清扫导致的剩余的未清扫span过多而拖后下一次GC开始时间的问题，Go语言采用了辅助清扫的手段。即工作协程必须在适当的时机执行辅助清扫工作，以避免下一次GC发生时还有大量的未清扫span。判断是否需要清扫的最好时机是在工作协程分配内存时。
 
 ## 21. 调试：特征分析和事件追踪
 
