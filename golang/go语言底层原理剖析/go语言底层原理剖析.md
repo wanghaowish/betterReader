@@ -3430,5 +3430,74 @@ func (c *mcentral) partialSwept(sweepgen uint32) *spanSet {
 
 为了规避懒清扫导致的剩余的未清扫span过多而拖后下一次GC开始时间的问题，Go语言采用了辅助清扫的手段。即工作协程必须在适当的时机执行辅助清扫工作，以避免下一次GC发生时还有大量的未清扫span。判断是否需要清扫的最好时机是在工作协程分配内存时。
 
+目前Go语言会在两个时机判断是否需要辅助扫描。一个是在需要向mcentral申请内存时，一个是在大对象分配时。在这两个时间会判断当前已经清扫的page数是否大于清理的目标page数，如果否就会进行辅助清扫知道条件成立。sweepPagesPerByte是一个重要参数，代表工作协程每分配1byte需要辅助清扫的page数。
+
+```go
+	sweptBasis := atomic.Load64(&mheap_.pagesSweptBasis)
+
+	// Fix debt if necessary.
+	newHeapLive := uintptr(atomic.Load64(&gcController.heapLive)-mheap_.sweepHeapLiveBasis) + spanBytes
+	pagesTarget := int64(mheap_.sweepPagesPerByte*float64(newHeapLive)) - int64(callerSweepPages)
+	for pagesTarget > int64(atomic.Load64(&mheap_.pagesSwept)-sweptBasis) {
+		if sweepone() == ^uintptr(0) {
+			mheap_.sweepPagesPerByte = 0
+			break
+		}
+		if atomic.Load64(&mheap_.pagesSweptBasis) != sweptBasis {
+			// Sweep pacing changed. Recompute debt.
+			goto retry
+		}
+	}
+	...
+		//未清扫页数=使用中的页数-已清扫的页数
+		sweepDistancePages := int64(pagesInUse) - int64(pagesSwept)
+		if sweepDistancePages <= 0 {
+			mheap_.sweepPagesPerByte = 0
+		} else {
+			mheap_.sweepPagesPerByte = float64(sweepDistancePages) / float64(heapDistance)
+			mheap_.sweepHeapLiveBasis = heapLiveBasis
+			// Write pagesSweptBasis last, since this
+			// signals concurrent sweeps to recompute
+			// their debt.
+			atomic.Store64(&mheap_.pagesSweptBasis, pagesSwept)
+		}
+```
+
+可以看出，辅助标记策略会尽可能地保证在下次触发GC时，已经扫描了所有带扫描的span。
+
+##### 系统驻留内存清除
+
+驻留内存(RSS)是主内存(RAM)保留的进程占用的内存部分，是从操作系统中分配的内存。为了将系统分配的内存保持在适当的大小，同时回收不再被使用的内存，Go语言使用了一个单独的后台清扫协程来清除内存，目前后台清扫协程是在程序开始时启动的，并且只启动一个。
+
+```go
+// gcenable is called after the bulk of the runtime initialization,
+// just before we're about to start letting user code run.
+// It kicks off the background sweeper goroutine, the background
+// scavenger goroutine, and enables GC.
+func gcenable() {
+	// Kick off sweeping and scavenging.
+	gcenable_setup = make(chan int, 2)
+    //启动后台清扫协程，与用户态代码并发被调度，归还从内存分配器中申请的内存。
+	go bgsweep()
+    //启动后台清扫协程，与用户态代码并发被调度，归还从操作系统中申请的内存。
+	go bgscavenge()
+	<-gcenable_setup
+	<-gcenable_setup
+	gcenable_setup = nil
+	memstats.enablegc = true // now that runtime is initialized, GC is okay
+}
+```
+
+清除策略占用当前线程CPU1%的时间进行清除，所以大部分时间里，该协程处于休眠状态。bgscavenge保证实现1%CPU执行时间的目标。
+
+在默认情况下，当占用内存达到上一次GC标记内存的2倍后将触发垃圾回收。
+
 ## 21. 调试：特征分析和事件追踪
 
+Go语言中的pprof指对于指标或特征的分析，通过分析不仅可以查到程序中的错误（内存泄漏，race冲突，协程泄露），也能对程序进行优化。有标准库net/http/pprof（提供了通过http访问的便利方式）和runtime/pprof用于对外交互。
+
+### pprof的使用方式
+
+通过pprof进行特征分析时需要执行两个步骤：收集样本和分析样本。
+
+收集样本可以通过两种方式，一个是引用net/http/pprof并在程序中开启http服务器，net/http/pprof会在初始化init函数时注册路由。
