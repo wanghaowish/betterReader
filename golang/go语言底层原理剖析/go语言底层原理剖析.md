@@ -1731,7 +1731,7 @@ type RWMutex struct {
 
 * 读锁
 
-  读取操作先通过院子操作将readerCount加1，如果readerCount≥0就直接返回，所以如果只是获取读取锁的操作，那么其成本只有一个原子操作。如果readerCount＜0，说明当前有写锁，当前协程将借助信号量陷入等待状态，如果获取到信号量则立即退出，没有获取到信号量时的逻辑与互斥锁逻辑类似。
+  读取操作先通过原子操作将readerCount加1，如果readerCount≥0就直接返回，所以如果只是获取读取锁的操作，那么其成本只有一个原子操作。如果readerCount＜0，说明当前有写锁，当前协程将借助信号量陷入等待状态，如果获取到信号量则立即退出，没有获取到信号量时的逻辑与互斥锁逻辑类似。
 
   ```go
   // Happens-before relationships are indicated to the race detector via:
