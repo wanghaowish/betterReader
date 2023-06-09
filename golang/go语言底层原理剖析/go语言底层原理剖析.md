@@ -3500,4 +3500,10 @@ Go语言中的pprof指对于指标或特征的分析，通过分析不仅可以�
 
 通过pprof进行特征分析时需要执行两个步骤：收集样本和分析样本。
 
-收集样本可以通过两种方式，一个是引用net/http/pprof并在程序中开启http服务器，net/http/pprof会在初始化init函数时注册路由。
+收集样本可以通过两种方式，一个是引用net/http/pprof并在程序中开启http服务器，net/http/pprof会在初始化init函数时注册路由。另一种方式是直接在代码中需要分析的位置嵌入runtime/pprof分析函数。
+
+### trace
+
+trace工具可以提供指定时间内程序发生的时间的完整信息。这些信息包括：协程的创建、开始和结束，协程堵塞——系统调用、通道、锁，网络I/O相关事件，系统相关事件，垃圾回收相关事件。
+
+收集trace文件的方式和pprof类似，一个是runtime/trace包，一个是net/http/pprof库集成了trace接口。
