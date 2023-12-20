@@ -1,5 +1,9 @@
 # StatefulSet
 
+k8s官方链接：https://kubernetes.io/zh-cn/docs/concepts/workloads/controllers/statefulset/
+
+k8s github源码地址：https://github.com/kubernetes/kubernetes
+
 # StatefulSet的基本介绍
 
 ## 作用
