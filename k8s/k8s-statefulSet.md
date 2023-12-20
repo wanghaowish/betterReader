@@ -4,6 +4,13 @@
 
 ## 作用
 
+StatefulSet 对于需要满足以下一个或多个需求的应用程序很有价值：
+
+- 稳定的、唯一的网络标识符。
+- 稳定的、持久的存储。
+- 有序的、优雅的部署和扩缩。
+- 有序的、自动的滚动更新。
+
 statefulSet主要用于创建有状态的pod。保证pod在重新调度后保留它们的名称、标识和状态。使用场景：在有状态分部署存储应用中，Pod 的多副本有各自独立的 PVC 和 PV，pod 在新节点重建后需保证状态一致。
 
 ## 创建
@@ -44,6 +51,7 @@ spec:
           storage: 1Mi
       accessModes:
       - ReadWriteOnce
+      storageClassName: "my-storage-class"
 ```
 
 对于一个拥有 N 个副本的 statefulset，pod 是按照 {0..N-1}的序号顺序创建的，并且会等待前一个 pod 变为 Running & Ready 后才会启动下一个 pod。
@@ -54,7 +62,17 @@ statefulset 扩容时 pod 也是顺序创建的，编号与前面的 pod 相接�
 
 缩容时控制器会按照与 pod 序号索引相反的顺序删除pod，在删除下一个 pod 前会等待上一个被完全删除。
 
+ `kubectl scale statefulset statefulset --replicas=X` or ` kubectl apply -f statefulset.yaml`
+
 ## 更新
+
+k8s资源三大重要部分：
+
+- metadata包括名称、命名控件、标签及关于该容器的其他信息
+- spec包含pod内容的实际说明
+- status包含运行中的pod的当前信息
+
+kubectl explain可用来发现可能的API对象字段。可查看每个API对象支持哪些属性
 
 更新策略由 statefulset 中的 spec.updateStrategy.type 字段决定，可以指定为 OnDelete 或者 RollingUpdate , 默认的更新策略为 RollingUpdate。
 
@@ -92,13 +110,13 @@ FIELDS:
 
 如果 statefulset 的 .spec.updateStrategy.type 字段被设置为 OnDelete，在更新 statefulset 时，statefulset controller 将不会自动更新其 pod。你必须手动删除 pod，此时 statefulset controller 在重新创建 pod 时，使用修改过的 spec.template 的内容创建新 pod。
 
-使用滚动更新策略时你必须以某种策略不段更新 partition 值来进行升级，类似于金丝雀部署方式，升级对于 pod 名称来说是逆序。使用非滚动更新方式式，需要手动删除对应的 pod，升级可以是无序的。
+使用滚动更新策略时你必须以某种策略不断更新 partition 值来进行升级，类似于金丝雀部署方式，升级对于 pod 名称来说是逆序。使用非滚动更新方式时，需要手动删除对应的 pod，升级可以是无序的。
 
 ## 回滚
 
 statefulSet的回滚操作其实也是进行了一次发布更新。和发布更新的策略一样，更新 statefulset 后需要按照对应的策略手动删除 pod 或者修改 partition 字段以达到回滚 pod 的目的。但是要注意的是statefulSet对象回滚很简单，它使用的pv中保存的数据无法回滚。
 
-![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/format-sts.png)
+![img](https://cdn.jsdelivr.net/gh/wanghaowish/picGo@main/img/202312201050537.png)
 
 ## 删除
 
