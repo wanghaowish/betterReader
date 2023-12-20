@@ -427,7 +427,7 @@ func (ssc *defaultStatefulSetControl) performUpdate(
 8. 判断 sts 的更新策略 `.Spec.UpdateStrategy.Type`，若为 `OnDelete` 则直接返回；
 9. 此时更新策略为 `RollingUpdate`，更新序号大于等于 `.Spec.UpdateStrategy.RollingUpdate.Partition` 的 pod，在 `RollingUpdate` 时，并不会关注 `monotonic` 的值，都是顺序进行处理且等待当前 pod 删除成功后才继续删除小于上一个 pod 序号的 pod，所以 `Parallel` 的策略在滚动更新时无法使用。
 
-`updateStatefulSet` 这个方法中包含了 statefulset 的创建、删除、扩若容、更新等操作。
+`updateStatefulSet` 这个方法中包含了 statefulset 的创建、删除、扩缩容、更新等操作。
 
 - 创建：在创建 sts 后，sts 对象已被保存至 etcd 中，此时 sync 操作仅仅是创建出需要的 pod，即执行到第 6 步就会结束；
 - 扩缩容：对于扩若容操作仅仅是创建或者删除对应的 pod，在操作前也会判断所有 pod 是否处于 `running & ready`状态，然后进行对应的创建/删除操作，在上面的步骤中也会执行到第 6 步就结束了；
